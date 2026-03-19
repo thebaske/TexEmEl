@@ -1,0 +1,192 @@
+// ============================================================================
+// DocumentTree — The canonical document model for TexSaur
+//
+// Every imported format is parsed into this structure.
+// The editor operates on it. Exporters read from it.
+// This file has ZERO external dependencies.
+// ============================================================================
+
+// --- Document Root ---
+
+export interface DocumentTree {
+  blocks: Block[];
+  metadata: DocumentMetadata;
+}
+
+export interface DocumentMetadata {
+  title?: string;
+  author?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+  sourceFormat?: string;
+  sourceFileName?: string;
+}
+
+// --- Block Types ---
+
+export type Block =
+  | ParagraphBlock
+  | HeadingBlock
+  | ListBlock
+  | TableBlock
+  | ImageBlock
+  | CodeBlock
+  | BlockquoteBlock
+  | DividerBlock;
+
+export type BlockType = Block['type'];
+
+export interface ParagraphBlock {
+  type: 'paragraph';
+  content: InlineContent[];
+  alignment?: TextAlignment;
+}
+
+export interface HeadingBlock {
+  type: 'heading';
+  level: 1 | 2 | 3 | 4 | 5 | 6;
+  content: InlineContent[];
+}
+
+export interface ListBlock {
+  type: 'list';
+  ordered: boolean;
+  items: ListItem[];
+}
+
+export interface ListItem {
+  content: InlineContent[];
+  checked?: boolean;
+  children?: ListBlock;
+}
+
+export interface TableBlock {
+  type: 'table';
+  headers: TableCell[];
+  rows: TableCell[][];
+}
+
+export interface TableCell {
+  content: InlineContent[];
+  colspan?: number;
+  rowspan?: number;
+}
+
+export interface ImageBlock {
+  type: 'image';
+  src: string;
+  alt?: string;
+  title?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface CodeBlock {
+  type: 'codeBlock';
+  language?: string;
+  code: string;
+}
+
+export interface BlockquoteBlock {
+  type: 'blockquote';
+  blocks: Block[];
+}
+
+export interface DividerBlock {
+  type: 'divider';
+}
+
+// --- Inline Content ---
+
+export type InlineContent =
+  | TextInline
+  | LinkInline
+  | ImageInline
+  | CodeInline
+  | BreakInline;
+
+export type InlineType = InlineContent['type'];
+
+export interface TextInline {
+  type: 'text';
+  text: string;
+  marks?: TextMark[];
+}
+
+export interface LinkInline {
+  type: 'link';
+  href: string;
+  title?: string;
+  content: InlineContent[];
+}
+
+export interface ImageInline {
+  type: 'image';
+  src: string;
+  alt?: string;
+}
+
+export interface CodeInline {
+  type: 'code';
+  text: string;
+}
+
+export interface BreakInline {
+  type: 'break';
+}
+
+// --- Text Marks ---
+
+export type TextMark =
+  | { type: 'bold' }
+  | { type: 'italic' }
+  | { type: 'underline' }
+  | { type: 'strikethrough' }
+  | { type: 'code' }
+  | { type: 'highlight'; color?: string }
+  | { type: 'color'; color: string }
+  | { type: 'superscript' }
+  | { type: 'subscript' };
+
+export type TextMarkType = TextMark['type'];
+
+// --- Enums ---
+
+export type TextAlignment = 'left' | 'center' | 'right' | 'justify';
+
+// --- Factory Helpers ---
+
+export function createEmptyDocument(title?: string): DocumentTree {
+  return {
+    blocks: [
+      {
+        type: 'paragraph',
+        content: [],
+      },
+    ],
+    metadata: {
+      title: title ?? 'Untitled',
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+    },
+  };
+}
+
+export function createTextInline(text: string, marks?: TextMark[]): TextInline {
+  return { type: 'text', text, marks };
+}
+
+export function createParagraph(text: string): ParagraphBlock {
+  return {
+    type: 'paragraph',
+    content: text ? [createTextInline(text)] : [],
+  };
+}
+
+export function createHeading(level: HeadingBlock['level'], text: string): HeadingBlock {
+  return {
+    type: 'heading',
+    level,
+    content: [createTextInline(text)],
+  };
+}

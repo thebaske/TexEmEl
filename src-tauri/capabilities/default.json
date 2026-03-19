@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicklasven/tauri/dev/crates/tauri-utils/schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for TexSaur",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "fs:default",
+    "fs:allow-exists",
+    "fs:allow-read-file",
+    "fs:allow-read-text-file",
+    "fs:allow-write-file",
+    "fs:allow-write-text-file",
+    "fs:read-all",
+    "fs:write-all",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}

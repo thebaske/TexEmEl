@@ -1,0 +1,87 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicklasven/tauri/dev/crates/tauri-cli/schema.json",
+  "productName": "TexSaur",
+  "version": "0.1.0",
+  "identifier": "app.texsaur.editor",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:3100",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "title": "TexSaur",
+    "windows": [
+      {
+        "title": "TexSaur",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["docx"],
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "description": "Word Document"
+      },
+      {
+        "ext": ["doc"],
+        "mimeType": "application/msword",
+        "description": "Legacy Word Document"
+      },
+      {
+        "ext": ["odt"],
+        "mimeType": "application/vnd.oasis.opendocument.text",
+        "description": "OpenDocument Text"
+      },
+      {
+        "ext": ["rtf"],
+        "mimeType": "application/rtf",
+        "description": "Rich Text Format"
+      },
+      {
+        "ext": ["md", "markdown"],
+        "mimeType": "text/markdown",
+        "description": "Markdown"
+      },
+      {
+        "ext": ["txt"],
+        "mimeType": "text/plain",
+        "description": "Plain Text"
+      },
+      {
+        "ext": ["html", "htm"],
+        "mimeType": "text/html",
+        "description": "HTML Document"
+      },
+      {
+        "ext": ["epub"],
+        "mimeType": "application/epub+zip",
+        "description": "EPUB eBook"
+      },
+      {
+        "ext": ["json"],
+        "mimeType": "application/json",
+        "description": "JSON Document"
+      }
+    ]
+  }
+}

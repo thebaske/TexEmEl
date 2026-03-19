@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "develosaur": {
+      "command": "npx",
+      "args": ["-y", "@develosaur/mcp@latest"],
+      "env": {}
+    }
+  }
+}

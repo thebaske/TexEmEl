@@ -1,5 +1,5 @@
 import type { FormatCodec } from './CodecRegistry';
-import type { DocumentTree, Block, InlineContent, TextMark, ListItem } from '../model/DocumentTree';
+import type { DocumentTree, Block, InlineContent, ListItem } from '../model/DocumentTree';
 
 // Markdown codec — parses Markdown into DocumentTree
 // Uses a simple recursive descent parser (no external dependencies)

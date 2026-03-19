@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:bnrldtitlxipituddgbl.supabase.co)",
+      "WebSearch",
+      "WebFetch(domain:www.develosaur.com)",
+      "WebFetch(domain:www.npmjs.com)",
+      "mcp__develosaur__get_tree",
+      "mcp__develosaur__create_node",
+      "mcp__develosaur__get_node",
+      "mcp__develosaur__list_tags",
+      "mcp__develosaur__create_tag"
+    ]
+  }
+}

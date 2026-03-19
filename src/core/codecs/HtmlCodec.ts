@@ -219,6 +219,7 @@ function collectMarks(el: HTMLElement): TextMark[] {
   const tag = el.tagName.toLowerCase();
   const marks: TextMark[] = [];
 
+  // Tag-based marks
   if (tag === 'strong' || tag === 'b') marks.push({ type: 'bold' });
   if (tag === 'em' || tag === 'i') marks.push({ type: 'italic' });
   if (tag === 'u') marks.push({ type: 'underline' });
@@ -226,6 +227,27 @@ function collectMarks(el: HTMLElement): TextMark[] {
   if (tag === 'mark') marks.push({ type: 'highlight' });
   if (tag === 'sup') marks.push({ type: 'superscript' });
   if (tag === 'sub') marks.push({ type: 'subscript' });
+
+  // Inline style-based marks (common in DOCX→HTML via mammoth, pasted HTML)
+  const style = el.style;
+  if (style.fontWeight === 'bold' || parseInt(style.fontWeight) >= 700) {
+    if (!marks.some((m) => m.type === 'bold')) marks.push({ type: 'bold' });
+  }
+  if (style.fontStyle === 'italic') {
+    if (!marks.some((m) => m.type === 'italic')) marks.push({ type: 'italic' });
+  }
+  if (style.textDecoration?.includes('underline')) {
+    if (!marks.some((m) => m.type === 'underline')) marks.push({ type: 'underline' });
+  }
+  if (style.textDecoration?.includes('line-through')) {
+    if (!marks.some((m) => m.type === 'strikethrough')) marks.push({ type: 'strikethrough' });
+  }
+  if (style.color) {
+    marks.push({ type: 'color', color: style.color });
+  }
+  if (style.backgroundColor && style.backgroundColor !== 'transparent') {
+    marks.push({ type: 'highlight', color: style.backgroundColor });
+  }
 
   return marks;
 }

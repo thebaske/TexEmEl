@@ -40,3 +40,6 @@ coverage/
 # Temp
 tmp/
 .tmp/
+
+# Develosaur MCP API key
+.develosaur.json

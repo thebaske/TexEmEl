@@ -41,6 +41,8 @@ function renderBlock(block: Block): string {
         .join('\n');
     case 'divider':
       return '---';
+    case 'container':
+      return block.children.map(renderBlock).join('\n\n');
   }
 }
 

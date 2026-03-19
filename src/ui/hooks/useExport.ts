@@ -2,6 +2,8 @@ import { useCallback } from 'react';
 import type { DocumentTree } from '../../core/model/DocumentTree';
 import { exportToHtml } from '../../core/export/HtmlExporter';
 import { exportToMarkdown } from '../../core/export/MarkdownExporter';
+import { exportToText } from '../../core/export/TxtExporter';
+import { exportToRtf } from '../../core/export/RtfExporter';
 
 async function saveTextWithTauri(
   content: string,
@@ -58,5 +60,21 @@ export function useExport() {
     return true;
   }, []);
 
-  return { exportHtml, exportMarkdown };
+  const exportText = useCallback(async (doc: DocumentTree): Promise<boolean> => {
+    const txt = exportToText(doc);
+    const name = baseName(doc) + '.txt';
+    const saved = await saveTextWithTauri(txt, name, 'Plain Text', ['txt']);
+    if (!saved) return saveWithBrowser(txt, name, 'text/plain');
+    return true;
+  }, []);
+
+  const exportRtf = useCallback(async (doc: DocumentTree): Promise<boolean> => {
+    const rtf = exportToRtf(doc);
+    const name = baseName(doc) + '.rtf';
+    const saved = await saveTextWithTauri(rtf, name, 'Rich Text Format', ['rtf']);
+    if (!saved) return saveWithBrowser(rtf, name, 'application/rtf');
+    return true;
+  }, []);
+
+  return { exportHtml, exportMarkdown, exportText, exportRtf };
 }

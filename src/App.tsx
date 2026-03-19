@@ -1,9 +1,10 @@
 import { useState, useCallback } from 'react';
-import type { Editor as TipTapEditor } from '@tiptap/react';
 import type { DocumentTree } from './core/model/DocumentTree';
 import { createEmptyDocument } from './core/model/DocumentTree';
+import type { BlockEngine } from './core/engine/BlockEngine';
 import { Editor } from './ui/components/Editor';
 import { Toolbar } from './ui/components/Toolbar';
+import { MenuBar } from './ui/components/MenuBar';
 import { useFileOpen } from './ui/hooks/useFileOpen';
 import { useExport } from './ui/hooks/useExport';
 import { useFileDrop } from './ui/hooks/useFileDrop';
@@ -16,11 +17,11 @@ function App() {
   const [document, setDocument] = useState<DocumentTree>(createEmptyDocument());
   const [fileName, setFileName] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
-  const [editor, setEditor] = useState<TipTapEditor | null>(null);
-  const [showRecent, setShowRecent] = useState(false);
+  const [engine, setEngine] = useState<BlockEngine | null>(null);
+  const [toolbarVersion, setToolbarVersion] = useState(0);
 
   const { openFile, openFilePath } = useFileOpen();
-  const { exportHtml, exportMarkdown } = useExport();
+  const { exportHtml, exportMarkdown, exportText, exportRtf } = useExport();
   const { recentFiles, addRecentFile, clearRecentFiles } = useRecentFiles();
 
   const loadDocument = useCallback((tree: DocumentTree) => {
@@ -35,6 +36,12 @@ function App() {
   // Handle file-open on launch (Tauri file associations)
   useFileDrop(loadDocument);
 
+  const handleNew = useCallback(() => {
+    setDocument(createEmptyDocument());
+    setFileName(null);
+    setIsDirty(false);
+  }, []);
+
   const handleDocumentChange = useCallback((updatedDoc: DocumentTree) => {
     setDocument(updatedDoc);
     setIsDirty(true);
@@ -46,10 +53,13 @@ function App() {
   }, [openFile, loadDocument]);
 
   const handleOpenRecent = useCallback(async (path: string) => {
-    setShowRecent(false);
     const tree = await openFilePath(path);
     if (tree) loadDocument(tree);
   }, [openFilePath, loadDocument]);
+
+  const handleSave = useCallback(async () => {
+    await exportHtml(document);
+  }, [exportHtml, document]);
 
   const handleExportHtml = useCallback(async () => {
     await exportHtml(document);
@@ -59,12 +69,23 @@ function App() {
     await exportMarkdown(document);
   }, [exportMarkdown, document]);
 
+  const handleExportText = useCallback(async () => {
+    await exportText(document);
+  }, [exportText, document]);
+
+  const handleExportRtf = useCallback(async () => {
+    await exportRtf(document);
+  }, [exportRtf, document]);
+
   const handlePrint = useCallback(() => {
     window.print();
   }, []);
 
-  const handleEditorReady = useCallback((ed: TipTapEditor) => {
-    setEditor(ed);
+  const handleEditorReady = useCallback((eng: BlockEngine) => {
+    setEngine(eng);
+    eng.onToolbarUpdate(() => {
+      setToolbarVersion(v => v + 1);
+    });
   }, []);
 
   return (
@@ -72,22 +93,25 @@ function App() {
       <div className="app-titlebar">
         <span className="app-title">TexSaur</span>
         <span className="app-filename">
-          {fileName ?? 'Untitled'}{isDirty ? ' •' : ''}
+          {fileName ?? 'Untitled'}{isDirty ? ' \u2022' : ''}
         </span>
       </div>
       <div className="app-toolbar">
-        <Toolbar
-          editor={editor}
-          onOpenFile={handleOpenFile}
+        <MenuBar
+          onNew={handleNew}
+          onOpen={handleOpenFile}
+          onSave={handleSave}
           onExportHtml={handleExportHtml}
           onExportMarkdown={handleExportMarkdown}
+          onExportText={handleExportText}
+          onExportRtf={handleExportRtf}
           onPrint={handlePrint}
           recentFiles={recentFiles}
-          showRecent={showRecent}
-          onToggleRecent={() => setShowRecent((v) => !v)}
           onOpenRecent={handleOpenRecent}
           onClearRecent={clearRecentFiles}
         />
+        <span className="toolbar-divider" />
+        <Toolbar engine={engine} version={toolbarVersion} />
       </div>
       <div className="app-editor">
         <Editor

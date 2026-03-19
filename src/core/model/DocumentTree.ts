@@ -22,6 +22,31 @@ export interface DocumentMetadata {
   sourceFileName?: string;
 }
 
+// --- Layout / Container ---
+
+export interface ContainerStyle {
+  padding?: BoxSpacing;
+  margin?: BoxSpacing;
+  width?: string;       // e.g. '100%', '300px', 'auto'
+  height?: string;
+  position?: 'static' | 'relative' | 'absolute';
+  top?: string;
+  left?: string;
+  display?: 'block' | 'flex' | 'inline-block';
+  flexDirection?: 'row' | 'column';
+  flexWrap?: 'nowrap' | 'wrap';
+  gap?: string;
+  alignItems?: string;
+  justifyContent?: string;
+}
+
+export interface BoxSpacing {
+  top?: string;
+  right?: string;
+  bottom?: string;
+  left?: string;
+}
+
 // --- Block Types ---
 
 export type Block =
@@ -32,35 +57,46 @@ export type Block =
   | ImageBlock
   | CodeBlock
   | BlockquoteBlock
-  | DividerBlock;
+  | DividerBlock
+  | ContainerBlock;
 
 export type BlockType = Block['type'];
 
-export interface ParagraphBlock {
+/** Base properties shared by all blocks */
+export interface BlockBase {
+  /** Stable unique ID — assigned by BlockEngine, persisted in .texsaur saves */
+  id?: string;
+  /** Optional layout/styling for the block's wrapper div */
+  containerStyle?: ContainerStyle;
+}
+
+export interface ParagraphBlock extends BlockBase {
   type: 'paragraph';
   content: InlineContent[];
   alignment?: TextAlignment;
 }
 
-export interface HeadingBlock {
+export interface HeadingBlock extends BlockBase {
   type: 'heading';
   level: 1 | 2 | 3 | 4 | 5 | 6;
   content: InlineContent[];
+  alignment?: TextAlignment;
 }
 
-export interface ListBlock {
+export interface ListBlock extends BlockBase {
   type: 'list';
   ordered: boolean;
   items: ListItem[];
 }
 
 export interface ListItem {
+  id?: string;
   content: InlineContent[];
   checked?: boolean;
   children?: ListBlock;
 }
 
-export interface TableBlock {
+export interface TableBlock extends BlockBase {
   type: 'table';
   headers: TableCell[];
   rows: TableCell[][];
@@ -72,28 +108,37 @@ export interface TableCell {
   rowspan?: number;
 }
 
-export interface ImageBlock {
+export type ImageAlignment = 'inline' | 'center' | 'float-left' | 'float-right';
+
+export interface ImageBlock extends BlockBase {
   type: 'image';
   src: string;
   alt?: string;
   title?: string;
   width?: number;
   height?: number;
+  alignment?: ImageAlignment;
 }
 
-export interface CodeBlock {
+export interface CodeBlock extends BlockBase {
   type: 'codeBlock';
   language?: string;
   code: string;
 }
 
-export interface BlockquoteBlock {
+export interface BlockquoteBlock extends BlockBase {
   type: 'blockquote';
   blocks: Block[];
 }
 
-export interface DividerBlock {
+export interface DividerBlock extends BlockBase {
   type: 'divider';
+}
+
+export interface ContainerBlock extends BlockBase {
+  type: 'container';
+  children: Block[];
+  layout?: 'flow' | 'flex-row' | 'flex-column';
 }
 
 // --- Inline Content ---
@@ -146,7 +191,10 @@ export type TextMark =
   | { type: 'highlight'; color?: string }
   | { type: 'color'; color: string }
   | { type: 'superscript' }
-  | { type: 'subscript' };
+  | { type: 'subscript' }
+  | { type: 'fontFamily'; family: string }
+  | { type: 'fontSize'; size: string }
+  | { type: 'link'; href: string; title?: string };
 
 export type TextMarkType = TextMark['type'];
 

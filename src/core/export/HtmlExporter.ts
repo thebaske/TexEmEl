@@ -107,8 +107,12 @@ function renderBlock(block: Block): string {
         : '';
       return `<p${align}>${renderInlines(block.content)}</p>`;
     }
-    case 'heading':
-      return `<h${block.level}>${renderInlines(block.content)}</h${block.level}>`;
+    case 'heading': {
+      const hAlign = block.alignment && block.alignment !== 'left'
+        ? ` style="text-align:${block.alignment}"`
+        : '';
+      return `<h${block.level}${hAlign}>${renderInlines(block.content)}</h${block.level}>`;
+    }
     case 'list':
       return renderList(block.ordered, block.items);
     case 'table':
@@ -120,7 +124,12 @@ function renderBlock(block: Block): string {
         block.width ? `width="${block.width}"` : '',
         block.height ? `height="${block.height}"` : '',
       ].filter(Boolean).join(' ');
-      return `<img src="${escapeHtml(block.src)}"${alt}${title}${dims ? ' ' + dims : ''}>`;
+      const styles: string[] = [];
+      if (block.alignment === 'center') styles.push('display: block; margin-left: auto; margin-right: auto');
+      if (block.alignment === 'float-left') styles.push('float: left; margin-right: 16px; margin-bottom: 8px');
+      if (block.alignment === 'float-right') styles.push('float: right; margin-left: 16px; margin-bottom: 8px');
+      const styleAttr = styles.length > 0 ? ` style="${styles.join('; ')}"` : '';
+      return `<img src="${escapeHtml(block.src)}"${alt}${title}${dims ? ' ' + dims : ''}${styleAttr}>`;
     }
     case 'codeBlock': {
       const langClass = block.language ? ` class="language-${escapeHtml(block.language)}"` : '';
@@ -130,6 +139,8 @@ function renderBlock(block: Block): string {
       return `<blockquote>\n${block.blocks.map(renderBlock).join('\n')}\n</blockquote>`;
     case 'divider':
       return '<hr>';
+    case 'container':
+      return `<div>${block.children.map(renderBlock).join('\n')}</div>`;
   }
 }
 
@@ -219,10 +230,16 @@ function applyMark(html: string, mark: TextMark): string {
     case 'underline': return `<u>${html}</u>`;
     case 'strikethrough': return `<s>${html}</s>`;
     case 'code': return `<code>${html}</code>`;
-    case 'highlight': return `<mark>${html}</mark>`;
+    case 'highlight': {
+      const bg = mark.color ? ` style="background-color:${mark.color}"` : '';
+      return `<mark${bg}>${html}</mark>`;
+    }
     case 'color': return `<span style="color:${mark.color}">${html}</span>`;
+    case 'fontFamily': return `<span style="font-family:${mark.family}">${html}</span>`;
+    case 'fontSize': return `<span style="font-size:${mark.size}">${html}</span>`;
     case 'superscript': return `<sup>${html}</sup>`;
     case 'subscript': return `<sub>${html}</sub>`;
+    case 'link': return `<a href="${escapeHtml(mark.href)}">${html}</a>`;
   }
 }
 

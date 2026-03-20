@@ -9,7 +9,17 @@
 // Requires DOM access — runs after render.
 // ============================================================================
 
-import type { CellHandle } from './CellRenderer';
+import type { BlockNode } from '../engine/BlockNode';
+
+/**
+ * Lightweight interface for cell measurement.
+ * Works with both CellRenderer.CellHandle (legacy) and CellInstance (V3).
+ */
+export interface MeasurableCell {
+  cellId: string;
+  contentElement: HTMLElement;
+  blockNodes: BlockNode[];
+}
 
 // --- Types ---
 
@@ -46,7 +56,7 @@ export class OverflowDetector {
   /**
    * Check if a cell has overflow (content taller than available space).
    */
-  hasOverflow(handle: CellHandle): boolean {
+  hasOverflow(handle: MeasurableCell): boolean {
     const el = handle.contentElement;
     return el.scrollHeight > el.clientHeight + 1; // 1px tolerance
   }
@@ -54,7 +64,7 @@ export class OverflowDetector {
   /**
    * Measure all block positions within a cell, relative to the cell content area.
    */
-  measureBlockPositions(handle: CellHandle): BlockPosition[] {
+  measureBlockPositions(handle: MeasurableCell): BlockPosition[] {
     const contentRect = handle.contentElement.getBoundingClientRect();
     const positions: BlockPosition[] = [];
 
@@ -78,7 +88,7 @@ export class OverflowDetector {
    *
    * Returns full overflow info including potential mid-paragraph line break.
    */
-  findBreakPoint(handle: CellHandle): OverflowInfo {
+  findBreakPoint(handle: MeasurableCell): OverflowInfo {
     const cellId = handle.cellId;
     const cellHeight = handle.contentElement.clientHeight;
 

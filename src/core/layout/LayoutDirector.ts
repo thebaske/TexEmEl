@@ -20,6 +20,9 @@ import { CellPool } from './CellPool';
 import { LayoutReconciler } from './LayoutReconciler';
 import { SplitResizeManager } from './SplitResizeManager';
 import { EdgeSplitManager } from './EdgeSplitManager';
+import { FlowGraph } from './FlowGraph';
+import { OverflowWatcher } from './OverflowWatcher';
+import { OverflowDetector } from './OverflowDetector';
 import {
   type LayoutNode,
   type LeafNode,
@@ -72,6 +75,9 @@ export class LayoutDirector {
   private reconciler: LayoutReconciler | null = null;
   private resizeManager: SplitResizeManager | null = null;
   private edgeSplitManager: EdgeSplitManager | null = null;
+  private flowGraph: FlowGraph = new FlowGraph();
+  private overflowWatcher: OverflowWatcher | null = null;
+  private overflowDetector = new OverflowDetector();
 
   // Kernel factory — injected by consumer
   private kernelFactory: ((node: BlockNode, el: HTMLElement, block: Block) => ITextKernel) | null = null;
@@ -105,6 +111,9 @@ export class LayoutDirector {
     container.tabIndex = -1;
     container.style.outline = 'none';
 
+    // Clear any stale DOM from prior mount (React StrictMode double-fires effects)
+    container.innerHTML = '';
+
     // Convert flat block list to single-page BSP layout
     const blocks = assignBlockIds(doc.blocks);
     this.pages = [createPage(blocks)];
@@ -131,6 +140,9 @@ export class LayoutDirector {
     // Initial render
     this.reconciler.reconcilePages(container, this.pages);
 
+    // Build flow graph and start overflow watching
+    this.rebuildFlowAndWatch();
+
     // Set up resize manager
     this.resizeManager = new SplitResizeManager(container, {
       onResize: (splitId, ratio) => {
@@ -144,6 +156,8 @@ export class LayoutDirector {
           }
         }
         this.syncToReact();
+        // Resize may cause overflow/underflow — force check all cells
+        this.overflowWatcher?.forceCheckAll();
       },
     });
 
@@ -162,7 +176,10 @@ export class LayoutDirector {
   update(doc: DocumentTree): void {
     if (!this.container || !this.cellPool || !this.reconciler) return;
 
-    // Release all existing cells — fresh start for new document
+    // Destroy old subsystems first (removes orphan DOM elements)
+    this.overflowWatcher?.destroy();
+    this.overflowWatcher = null;
+    this.reconciler.destroy();
     this.cellPool.destroy();
 
     // Recreate pool (factory references are preserved)
@@ -191,14 +208,19 @@ export class LayoutDirector {
     this.focusedBlockId = null;
 
     this.reconciler.reconcilePages(this.container, this.pages);
+
+    // Rebuild flow graph and start overflow watching
+    this.rebuildFlowAndWatch();
   }
 
   destroy(): void {
     if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.overflowWatcher?.destroy();
     this.resizeManager?.destroy();
     this.edgeSplitManager?.destroy();
     this.reconciler?.destroy();
     this.cellPool?.destroy();
+    this.flowGraph.clear();
     this.onChangeCallbacks = [];
     this.onToolbarUpdateCallbacks = [];
     this.container = null;
@@ -237,6 +259,9 @@ export class LayoutDirector {
 
     // Reconcile — cellPool.acquire(targetId) returns EXISTING cell, reparents it
     this.reconciler.reconcilePages(this.container!, this.pages);
+
+    // Rebuild flow graph and watch new cells
+    this.rebuildFlowAndWatch();
     this.syncToReact();
   }
 
@@ -277,6 +302,9 @@ export class LayoutDirector {
 
     // Reconcile — orphaned cells get cleaned up
     this.reconciler.reconcilePages(this.container!, this.pages);
+
+    // Rebuild flow graph
+    this.rebuildFlowAndWatch();
     this.syncToReact();
   }
 
@@ -682,6 +710,151 @@ export class LayoutDirector {
     this.syncTimer = setTimeout(() => {
       this.syncToReact();
     }, this.config.debounceMs);
+  }
+
+  // =====================
+  //  FLOW & OVERFLOW
+  // =====================
+
+  /**
+   * Rebuild the flow graph from current BSP tree structure
+   * and (re)start overflow watching on all cells.
+   */
+  private rebuildFlowAndWatch(): void {
+    if (!this.cellPool) return;
+
+    // Rebuild flow graph from current tree structure
+    this.flowGraph = FlowGraph.fromPages(this.pages);
+
+    // Tear down and recreate overflow watcher
+    this.overflowWatcher?.destroy();
+    this.overflowWatcher = new OverflowWatcher({
+      onOverflow: (cellId) => this.handleOverflow(cellId),
+      onUnderflow: (cellId) => this.handleUnderflow(cellId),
+      threshold: 2,
+    });
+
+    // Watch all live cells
+    for (const page of this.pages) {
+      const leaves = getAllLeaves(page.layout);
+      for (const leaf of leaves) {
+        const cell = this.cellPool.get(leaf.id);
+        if (cell) {
+          this.overflowWatcher.watch(cell);
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle overflow: move excess blocks from this cell to its flow target.
+   */
+  private handleOverflow(cellId: string): void {
+    if (!this.cellPool) return;
+
+    const cell = this.cellPool.get(cellId);
+    if (!cell) return;
+
+    // Guard: prevent re-entrant overflow during resolution
+    this.overflowWatcher?.beginResolving();
+
+    try {
+      // Find where the break should happen
+      const measurable = {
+        cellId: cell.id,
+        contentElement: cell.contentElement,
+        blockNodes: cell.getBlockNodes(),
+      };
+      const info = this.overflowDetector.findBreakPoint(measurable);
+
+      if (!info.hasOverflow || info.lastFittingBlockIndex >= cell.blockCount() - 1) {
+        return; // No actual overflow or all blocks fit
+      }
+
+      // Trim blocks after the break point
+      const trimIndex = info.lastFittingBlockIndex + 1;
+      const overflowBlocks = cell.trimFrom(trimIndex);
+
+      if (overflowBlocks.length === 0) return;
+
+      // Find the flow target
+      const targetId = this.flowGraph.getTarget(cellId);
+      if (targetId) {
+        const targetCell = this.cellPool.get(targetId);
+        if (targetCell) {
+          targetCell.prependBlocks(overflowBlocks);
+        }
+      } else {
+        // No flow target — create a new page with these blocks
+        this.createOverflowPage(overflowBlocks);
+      }
+
+      this.syncToReact();
+    } finally {
+      this.overflowWatcher?.endResolving();
+    }
+  }
+
+  /**
+   * Handle underflow: pull blocks back from flow target if this cell has room.
+   */
+  private handleUnderflow(cellId: string): void {
+    if (!this.cellPool) return;
+
+    const targetId = this.flowGraph.getTarget(cellId);
+    if (!targetId) return;
+
+    const cell = this.cellPool.get(cellId);
+    const targetCell = this.cellPool.get(targetId);
+    if (!cell || !targetCell || targetCell.isEmpty()) return;
+
+    // Guard against re-entrant underflow
+    this.overflowWatcher?.beginResolving();
+
+    try {
+      // Try to pull the first block from the target back to this cell
+      const targetBlocks = targetCell.getBlockNodes();
+      if (targetBlocks.length === 0) return;
+
+      // Get the first block's data
+      const firstBlockData = targetBlocks[0].getData();
+
+      // Speculatively add it
+      cell.appendBlocks([firstBlockData]);
+
+      // Check if it fits now
+      const measurable = {
+        cellId: cell.id,
+        contentElement: cell.contentElement,
+        blockNodes: cell.getBlockNodes(),
+      };
+
+      if (this.overflowDetector.hasOverflow(measurable)) {
+        // Doesn't fit — remove the block we just added
+        const lastIdx = cell.blockCount() - 1;
+        cell.trimFrom(lastIdx);
+      } else {
+        // It fits! Remove from target
+        targetCell.removeBlock(firstBlockData.id!);
+        this.syncToReact();
+      }
+    } finally {
+      this.overflowWatcher?.endResolving();
+    }
+  }
+
+  /**
+   * Create a new page to hold overflow content.
+   */
+  private createOverflowPage(blocks: Block[]): void {
+    const newPage = createPage(blocks);
+    this.pages = [...this.pages, newPage];
+
+    // Reconcile to render the new page
+    this.reconciler?.reconcilePages(this.container!, this.pages);
+
+    // Rebuild flow graph to include new page
+    this.rebuildFlowAndWatch();
   }
 
   /**

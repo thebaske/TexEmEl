@@ -14,11 +14,20 @@
   min-height: 100%;
 }
 
-/* BSP Editor Content — full-width layout surface */
+/* BSP mode: container centers the page with padding */
+.bsp-editor-container {
+  padding: 32px 16px;
+  overflow: auto;
+  align-items: flex-start;
+}
+
+/* BSP Editor Content — a fixed-size document page.
+   The BSP tree fills this page. Content scrolls WITHIN cells. */
 .bsp-editor-content {
   width: 100%;
-  max-width: 900px;
-  min-height: calc(100vh - 160px);
+  max-width: 816px;       /* ~8.5 inches at 96dpi (letter width) */
+  height: 1056px;         /* ~11 inches at 96dpi (letter height) */
+  flex-shrink: 0;         /* don't shrink — keep page size */
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 2px;

@@ -55,10 +55,9 @@ export class EdgeSplitManager {
   }
 
   private handlePointerDown(e: PointerEvent): void {
-    // Don't interfere with resize handles or text editing
+    // Don't interfere with resize handles or context menus
     const target = e.target as HTMLElement;
     if (target.classList.contains('bsp-resize-handle')) return;
-    if (target.closest('.ProseMirror')) return;
     if (target.closest('.bsp-context-menu')) return;
 
     // Find which cell and which edge
@@ -69,7 +68,7 @@ export class EdgeSplitManager {
     if (!cellId) return;
 
     const edge = this.detectEdge(cellEl, e.clientX, e.clientY);
-    if (!edge) return;
+    if (!edge) return; // Not near an edge — let normal click/text editing happen
 
     e.preventDefault();
     e.stopPropagation();

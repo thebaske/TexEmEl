@@ -69,7 +69,7 @@ export function BspEditor({ document, onDocumentChange, onEditorReady }: BspEdit
   }, [document.metadata.sourceFileName, document.metadata.createdAt]);
 
   return (
-    <div className="editor-container">
+    <div className="editor-container bsp-editor-container">
       <div ref={containerRef} className="bsp-editor-content" />
     </div>
   );

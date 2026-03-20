@@ -8,7 +8,7 @@
 
 import { EditorState, type Transaction } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import { Schema, DOMParser } from 'prosemirror-model';
+import { Schema, DOMParser, Node as PmNode } from 'prosemirror-model';
 import { schema as basicSchema } from 'prosemirror-schema-basic';
 import { addListNodes } from 'prosemirror-schema-list';
 import { keymap } from 'prosemirror-keymap';
@@ -230,17 +230,20 @@ export class TextKernel implements ITextKernel {
     // Read alignment from first block node
     const alignment = this.getTextAlign() || undefined;
 
+    // Capture lossless ProseMirror doc JSON for structural operations
+    const pmDocJson = doc.toJSON() as Record<string, unknown>;
+
     switch (this.block.type) {
       case 'paragraph':
-        return { ...this.block, content: inlines, alignment } as ParagraphBlock;
+        return { ...this.block, content: inlines, alignment, pmDocJson } as ParagraphBlock;
       case 'heading':
-        return { ...this.block, content: inlines, alignment } as HeadingBlock;
+        return { ...this.block, content: inlines, alignment, pmDocJson } as HeadingBlock;
       case 'codeBlock': {
         const text = doc.textContent;
-        return { ...this.block, code: text } as CodeBlock;
+        return { ...this.block, code: text, pmDocJson } as CodeBlock;
       }
       default:
-        return this.block;
+        return { ...this.block, pmDocJson };
     }
   }
 
@@ -417,16 +420,35 @@ export class TextKernel implements ITextKernel {
   // --- Conversion Helpers ---
 
   private blockToDoc(block: Block): any {
+    // If we have a lossless ProseMirror doc snapshot, use it directly
+    if (block.pmDocJson) {
+      try {
+        return PmNode.fromJSON(this.schema, block.pmDocJson);
+      } catch {
+        // Fall through to legacy conversion if JSON is incompatible
+      }
+    }
+
     switch (block.type) {
       case 'paragraph': {
-        const html = this.inlinesToHtml(block.content);
         const alignStyle = block.alignment ? ` style="text-align:${block.alignment}"` : '';
-        return this.htmlToDoc(`<p${alignStyle}>${html}</p>`);
+        // Split content on breaks to create separate <p> tags (preserves empty lines)
+        const paragraphs = this.splitOnBreaks(block.content);
+        const html = paragraphs
+          .map(p => `<p${alignStyle}>${this.inlinesToHtml(p)}</p>`)
+          .join('');
+        return this.htmlToDoc(html || `<p${alignStyle}></p>`);
       }
       case 'heading': {
-        const html = this.inlinesToHtml(block.content);
         const alignStyle = block.alignment ? ` style="text-align:${block.alignment}"` : '';
-        return this.htmlToDoc(`<h${block.level}${alignStyle}>${html}</h${block.level}>`);
+        // For headings, first paragraph is the heading, rest become <p> tags
+        const paragraphs = this.splitOnBreaks(block.content);
+        const firstPara = paragraphs[0] ?? [];
+        let html = `<h${block.level}${alignStyle}>${this.inlinesToHtml(firstPara)}</h${block.level}>`;
+        for (let i = 1; i < paragraphs.length; i++) {
+          html += `<p${alignStyle}>${this.inlinesToHtml(paragraphs[i])}</p>`;
+        }
+        return this.htmlToDoc(html);
       }
       case 'codeBlock': {
         return this.htmlToDoc(`<pre><code>${this.escapeHtml(block.code)}</code></pre>`);
@@ -434,6 +456,19 @@ export class TextKernel implements ITextKernel {
       default:
         return this.htmlToDoc('<p></p>');
     }
+  }
+
+  /** Split InlineContent[] on break elements into separate paragraph groups */
+  private splitOnBreaks(content: InlineContent[]): InlineContent[][] {
+    const result: InlineContent[][] = [[]];
+    for (const inline of content) {
+      if (inline.type === 'break') {
+        result.push([]); // Start new paragraph
+      } else {
+        result[result.length - 1].push(inline);
+      }
+    }
+    return result;
   }
 
   private htmlToDoc(html: string): any {
@@ -444,26 +479,38 @@ export class TextKernel implements ITextKernel {
 
   private docToInlines(doc: any): InlineContent[] {
     const inlines: InlineContent[] = [];
+    let isFirstBlock = true;
 
-    doc.descendants((node: any) => {
-      if (node.isText) {
-        const marks: TextMark[] = [];
-        for (const mark of node.marks) {
-          const mapped = this.mapPmMarkToTextMark(mark);
-          if (mapped) marks.push(mapped);
-        }
-        inlines.push({
-          type: 'text',
-          text: node.text!,
-          marks: marks.length > 0 ? marks : undefined,
-        });
-        return false;
-      }
-      if (node.type.name === 'hard_break') {
+    // Walk top-level block nodes (paragraphs, headings) to preserve line breaks
+    doc.forEach((blockNode: any) => {
+      // Add a break between paragraphs (not before the first one)
+      if (!isFirstBlock) {
         inlines.push({ type: 'break' });
-        return false;
       }
-      return true;
+      isFirstBlock = false;
+
+      // Empty paragraph → just the break above is enough (represents an empty line)
+      if (blockNode.content.size === 0) {
+        return;
+      }
+
+      // Walk inline content within this block node
+      blockNode.forEach((inlineNode: any) => {
+        if (inlineNode.isText) {
+          const marks: TextMark[] = [];
+          for (const mark of inlineNode.marks) {
+            const mapped = this.mapPmMarkToTextMark(mark);
+            if (mapped) marks.push(mapped);
+          }
+          inlines.push({
+            type: 'text',
+            text: inlineNode.text!,
+            marks: marks.length > 0 ? marks : undefined,
+          });
+        } else if (inlineNode.type.name === 'hard_break') {
+          inlines.push({ type: 'break' });
+        }
+      });
     });
 
     return inlines;

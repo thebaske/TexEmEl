@@ -1,28 +1,25 @@
 // ============================================================================
-// LayoutEngine — BSP Layout Orchestrator (Multi-Page)
+// LayoutDirector — Thin orchestrator for BSP layout (V3 Architecture)
 //
-// Manages a paginated document where each page has its own BSP tree.
-// Handles overflow detection and content redistribution across pages.
+// Replaces LayoutEngine. Delegates to:
+//   - CellPool: persistent cell instances
+//   - LayoutReconciler: diff-based DOM updates
+//   - SplitResizeManager: drag resize handles
+//   - EdgeSplitManager: edge-pull-to-split
 //
-// Responsibilities:
-//  - Manages Page[] (each page has a LayoutNode BSP tree)
-//  - Renders via CellRenderer (multi-page)
-//  - Handles split resize via SplitResizeManager
-//  - Handles edge-pull-to-split via EdgeSplitManager
-//  - Mounts TextKernel into leaf cells
-//  - Tracks active cell/page for toolbar commands
-//  - Runs overflow detection after layout changes
-//  - Provides split/merge/move operations
+// Key difference from LayoutEngine: NO nuclear renders. Cells survive all
+// layout operations. ProseMirror instances are never destroyed during
+// split/merge/resize.
 // ============================================================================
 
 import type { Block, DocumentTree, TextMark } from '../model/DocumentTree';
 import type { ITextKernel } from '../engine/types';
 import type { BlockNode } from '../engine/BlockNode';
 import { generateBlockId, assignBlockIds } from '../engine/BlockId';
-import { CellRenderer } from './CellRenderer';
+import { CellPool } from './CellPool';
+import { LayoutReconciler } from './LayoutReconciler';
 import { SplitResizeManager } from './SplitResizeManager';
 import { EdgeSplitManager } from './EdgeSplitManager';
-import { OverflowResolver } from './OverflowResolver';
 import {
   type LayoutNode,
   type LeafNode,
@@ -31,13 +28,12 @@ import {
   splitCell,
   mergeCells,
   resizeSplit,
-  moveContent,
-  updateLeafBlocks,
-  insertBlockInCell,
-  removeBlockFromCell,
   findNode,
   findParent,
   getAllLeaves,
+  insertBlockInCell,
+  removeBlockFromCell,
+  updateLeafBlocks,
 } from './LayoutTree';
 import {
   type Page,
@@ -50,21 +46,21 @@ import {
 
 export type OnLayoutChangeCallback = (tree: DocumentTree, layout: LayoutNode) => void;
 
-export interface LayoutEngineConfig {
+export interface LayoutDirectorConfig {
   debounceMs: number;
 }
 
-const DEFAULT_CONFIG: LayoutEngineConfig = {
+const DEFAULT_CONFIG: LayoutDirectorConfig = {
   debounceMs: 150,
 };
 
-// --- Engine ---
+// --- Director ---
 
-export class LayoutEngine {
+export class LayoutDirector {
   private container: HTMLElement | null = null;
-  private config: LayoutEngineConfig;
+  private config: LayoutDirectorConfig;
 
-  // State — multi-page
+  // State
   private pages: Page[] = [];
   private metadata: DocumentTree['metadata'] = {};
   private activeCellId: string | null = null;
@@ -72,12 +68,12 @@ export class LayoutEngine {
   private focusedBlockId: string | null = null;
 
   // Subsystems
-  private cellRenderer: CellRenderer;
+  private cellPool: CellPool | null = null;
+  private reconciler: LayoutReconciler | null = null;
   private resizeManager: SplitResizeManager | null = null;
   private edgeSplitManager: EdgeSplitManager | null = null;
-  private overflowResolver = new OverflowResolver();
 
-  // TextKernel factory — injected by consumer
+  // Kernel factory — injected by consumer
   private kernelFactory: ((node: BlockNode, el: HTMLElement, block: Block) => ITextKernel) | null = null;
 
   // Callbacks
@@ -86,18 +82,12 @@ export class LayoutEngine {
 
   // Debounce
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
-  private overflowTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(config?: Partial<LayoutEngineConfig>) {
+  constructor(config?: Partial<LayoutDirectorConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-
-    this.cellRenderer = new CellRenderer({
-      onCellClick: (cellId, e) => this.handleCellClick(cellId, e),
-      onCellDblClick: (cellId, _e) => this.handleCellDblClick(cellId),
-    });
   }
 
-  // ---- Backward-compat: expose first page's layout as "the layout" ----
+  // Backward-compat: expose first page's layout
   get layout(): LayoutNode {
     return this.pages.length > 0 ? this.pages[0].layout : createDefaultLayout();
   }
@@ -108,26 +98,8 @@ export class LayoutEngine {
 
   setKernelFactory(factory: (node: BlockNode, el: HTMLElement, block: Block) => ITextKernel): void {
     this.kernelFactory = factory;
-
-    this.cellRenderer.setMountKernel((node, contentEl, block) => {
-      const kernel = this.kernelFactory!(node, contentEl, block);
-      node.mountKernel(kernel);
-
-      kernel.onUpdate(() => {
-        node.onKernelChange();
-        this.debouncedSync();
-        // Only check overflow on content changes if we're not already mid-cascade
-        this.debouncedOverflowCheck();
-        this.emitToolbarUpdate();
-      });
-
-      kernel.onSelectionUpdate?.(() => {
-        this.emitToolbarUpdate();
-      });
-    });
   }
 
-  /** Mount the engine into a DOM container with initial document */
   mount(container: HTMLElement, doc: DocumentTree): void {
     this.container = container;
     container.tabIndex = -1;
@@ -139,16 +111,32 @@ export class LayoutEngine {
     this.activePageId = this.pages[0].id;
     this.metadata = doc.metadata;
 
-    // Render
-    this.fullRender();
+    // Create subsystems
+    this.cellPool = new CellPool({
+      kernelFactory: this.kernelFactory!,
+      onContentChange: (_cellId: string) => {
+        this.debouncedSync();
+        this.emitToolbarUpdate();
+      },
+      onSelectionChange: (_cellId: string) => {
+        this.emitToolbarUpdate();
+      },
+    });
+
+    this.reconciler = new LayoutReconciler(this.cellPool, {
+      onCellClick: (cellId, e) => this.handleCellClick(cellId, e),
+      onCellDblClick: (cellId, _e) => this.handleCellDblClick(cellId),
+    });
+
+    // Initial render
+    this.reconciler.reconcilePages(container, this.pages);
 
     // Set up resize manager
     this.resizeManager = new SplitResizeManager(container, {
       onResize: (splitId, ratio) => {
-        this.cellRenderer.updateSplitRatio(splitId, ratio, this.layout);
+        this.reconciler!.updateRatio(splitId, ratio);
       },
       onResizeEnd: (splitId, ratio) => {
-        // Find which page contains this split
         for (const page of this.pages) {
           if (findNode(page.layout, splitId)) {
             this.updatePageLayout(page.id, resizeSplit(page.layout, splitId, ratio));
@@ -156,11 +144,10 @@ export class LayoutEngine {
           }
         }
         this.syncToReact();
-        this.scheduleOverflowCheck();
       },
     });
 
-    // Set up edge split manager — edge pulls always split the cell
+    // Set up edge split manager
     this.edgeSplitManager = new EdgeSplitManager(container, {
       onEdgeSplit: (cellId, direction, ratio) => {
         this.split(direction, cellId, ratio);
@@ -170,42 +157,48 @@ export class LayoutEngine {
     // Global keyboard handlers
     container.addEventListener('keydown', (e) => this.handleKeyDown(e));
     container.addEventListener('contextmenu', (e) => this.handleContextMenu(e));
-
-    // Immediate overflow check on mount
-    requestAnimationFrame(() => this.checkOverflow());
   }
 
-  /** Update from external source (file open) */
   update(doc: DocumentTree): void {
-    if (!this.container) return;
+    if (!this.container || !this.cellPool || !this.reconciler) return;
+
+    // Release all existing cells — fresh start for new document
+    this.cellPool.destroy();
+
+    // Recreate pool (factory references are preserved)
+    this.cellPool = new CellPool({
+      kernelFactory: this.kernelFactory!,
+      onContentChange: (_cellId: string) => {
+        this.debouncedSync();
+        this.emitToolbarUpdate();
+      },
+      onSelectionChange: (_cellId: string) => {
+        this.emitToolbarUpdate();
+      },
+    });
+
+    // Rebuild reconciler with new pool
+    this.reconciler = new LayoutReconciler(this.cellPool, {
+      onCellClick: (cellId, e) => this.handleCellClick(cellId, e),
+      onCellDblClick: (cellId, _e) => this.handleCellDblClick(cellId),
+    });
+
     const blocks = assignBlockIds(doc.blocks);
     this.pages = [createPage(blocks)];
     this.activePageId = this.pages[0].id;
     this.metadata = doc.metadata;
     this.activeCellId = null;
     this.focusedBlockId = null;
-    this.fullRender();
-    // Immediate overflow check for file open (no debounce)
-    requestAnimationFrame(() => this.checkOverflow());
-  }
 
-  /** Load a saved layout */
-  loadLayout(layout: LayoutNode, metadata: DocumentTree['metadata']): void {
-    if (!this.container) return;
-    this.pages = [{ id: generateBlockId(), layout }];
-    this.activePageId = this.pages[0].id;
-    this.metadata = metadata;
-    this.activeCellId = null;
-    this.focusedBlockId = null;
-    this.fullRender();
+    this.reconciler.reconcilePages(this.container, this.pages);
   }
 
   destroy(): void {
     if (this.syncTimer) clearTimeout(this.syncTimer);
-    if (this.overflowTimer) clearTimeout(this.overflowTimer);
     this.resizeManager?.destroy();
     this.edgeSplitManager?.destroy();
-    this.cellRenderer.destroy();
+    this.reconciler?.destroy();
+    this.cellPool?.destroy();
     this.onChangeCallbacks = [];
     this.onToolbarUpdateCallbacks = [];
     this.container = null;
@@ -227,72 +220,78 @@ export class LayoutEngine {
   //  LAYOUT OPERATIONS
   // =====================
 
-  /** Split the active cell (or specified cell) in the given direction */
+  /**
+   * Split a cell. The original cell SURVIVES (keeps its ID, DOM, ProseMirror).
+   * Only a new empty sibling cell is created.
+   */
   split(direction: SplitDirection, cellId?: string, ratio = 0.5): void {
     const targetId = cellId ?? this.activeCellId;
-    if (!targetId) return;
+    if (!targetId || !this.reconciler) return;
 
-    // Sync live TextKernel content into layout tree FIRST
-    this.syncLiveContentToTree();
-
-    // Now find page with SYNCED layout
     const page = getPageForCell(this.pages, targetId);
     if (!page) return;
 
+    // Update tree — original cell keeps its ID (no content sync needed!)
     const { tree: newLayout } = splitCell(page.layout, targetId, direction, ratio);
     this.updatePageLayout(page.id, newLayout);
-    this.renderPages();
+
+    // Reconcile — cellPool.acquire(targetId) returns EXISTING cell, reparents it
+    this.reconciler.reconcilePages(this.container!, this.pages);
     this.syncToReact();
-    this.scheduleOverflowCheck();
   }
 
-  /** Merge a cell with its sibling */
+  /** Merge a cell with its sibling (reading order: first absorbs second) */
   merge(cellId?: string): void {
     const targetId = cellId ?? this.activeCellId;
-    if (!targetId) return;
+    if (!targetId || !this.cellPool || !this.reconciler) return;
 
-    // Sync live content FIRST
-    this.syncLiveContentToTree();
-
-    // Now find page with SYNCED layout
     const page = getPageForCell(this.pages, targetId);
     if (!page) return;
 
     const parent = findParent(page.layout, targetId);
     if (!parent) return;
 
+    // Determine reading order: first child absorbs second child's content
+    const isFirst = parent.first.id === targetId ||
+      (parent.first.type === 'split' && findNode(parent.first, targetId));
+
+    const survivorId = isFirst ? this.getFirstLeafId(parent.first) : this.getFirstLeafId(parent.second);
+    const victimId = isFirst ? this.getFirstLeafId(parent.second) : this.getFirstLeafId(parent.first);
+
+    if (!survivorId || !victimId) return;
+
+    // Live content transfer: survivor absorbs victim's blocks
+    const survivor = this.cellPool.get(survivorId);
+    const victim = this.cellPool.get(victimId);
+    if (survivor && victim) {
+      const victimContent = victim.drainAll();
+      if (victimContent.length > 0) {
+        survivor.appendBlocks(victimContent);
+      }
+    }
+
+    // Update tree structure (collapse the split)
     this.updatePageLayout(page.id, mergeCells(page.layout, parent.id));
-    this.activeCellId = null;
+    this.activeCellId = survivorId;
     this.focusedBlockId = null;
-    this.renderPages();
+
+    // Reconcile — orphaned cells get cleaned up
+    this.reconciler.reconcilePages(this.container!, this.pages);
     this.syncToReact();
   }
 
-  /** Move all content from one cell to another */
-  moveCellContent(fromCellId: string, toCellId: string, autoMerge = false): void {
-    const page = getPageForCell(this.pages, fromCellId);
-    if (!page) return;
-    this.updatePageLayout(page.id, moveContent(page.layout, fromCellId, toCellId, autoMerge));
-    this.fullRender();
-    this.syncToReact();
-  }
-
-  /** Get the current layout tree (first page, for backward compat) */
   getLayout(): LayoutNode {
     return this.layout;
   }
 
-  /** Get all pages */
   getPages(): Page[] {
     return this.pages;
   }
 
-  /** Get the active cell ID */
   getActiveCellId(): string | null {
     return this.activeCellId;
   }
 
-  /** Get the active page ID */
   getActivePageId(): string | null {
     return this.activePageId;
   }
@@ -345,6 +344,9 @@ export class LayoutEngine {
     const node = this.getFocusedBlockNode();
     if (!node || !this.activeCellId) return;
 
+    const cell = this.cellPool?.get(this.activeCellId);
+    if (!cell) return;
+
     const data = node.getData();
     if (data.type !== 'paragraph' && data.type !== 'heading') return;
 
@@ -361,43 +363,58 @@ export class LayoutEngine {
       return;
     }
 
+    // Update the tree (for serialization) and re-render just this cell
     const page = getPageForCell(this.pages, this.activeCellId);
     if (!page) return;
 
-    const cell = findNode(page.layout, this.activeCellId) as LeafNode | null;
-    if (!cell || cell.type !== 'leaf') return;
+    const leaf = findNode(page.layout, this.activeCellId) as LeafNode | null;
+    if (!leaf || leaf.type !== 'leaf') return;
 
-    const blockIndex = cell.blocks.findIndex(b => b.id === data.id);
+    const blockIndex = leaf.blocks.findIndex(b => b.id === data.id);
     if (blockIndex === -1) return;
 
-    const newBlocks = [...cell.blocks];
+    const newBlocks = [...leaf.blocks];
     newBlocks[blockIndex] = newBlock;
     this.updatePageLayout(page.id, updateLeafBlocks(page.layout, this.activeCellId, newBlocks));
-    this.fullRender();
+
+    // Remove old block and insert new one at same position in the live cell
+    cell.removeBlock(data.id!);
+    const newNode = cell.addBlock(newBlock, blockIndex);
     this.syncToReact();
 
+    // Focus the new block
     requestAnimationFrame(() => {
-      this.focusBlockInCell(this.activeCellId!, newBlock.id!);
+      if (newNode.isEditable() && newNode.kernel) {
+        this.focusedBlockId = newNode.id;
+        newNode.kernel.focus();
+        this.emitToolbarUpdate();
+      }
     });
   }
 
   insertBlock(block: Block): void {
+    if (!this.cellPool) return;
+
     if (!this.activeCellId) {
-      // Use first leaf of first page
       if (this.pages.length === 0) return;
       const leaves = getAllLeaves(this.pages[0].layout);
       if (leaves.length === 0) return;
       this.activeCellId = leaves[0].id;
     }
 
-    const page = getPageForCell(this.pages, this.activeCellId);
-    if (!page) return;
+    const cell = this.cellPool.get(this.activeCellId);
+    if (!cell) return;
 
     const newBlock = { ...block, id: generateBlockId() };
-    this.updatePageLayout(page.id, insertBlockInCell(page.layout, this.activeCellId, newBlock));
-    this.fullRender();
+    cell.addBlock(newBlock);
+
+    // Update tree for serialization
+    const page = getPageForCell(this.pages, this.activeCellId);
+    if (page) {
+      this.updatePageLayout(page.id, insertBlockInCell(page.layout, this.activeCellId, newBlock));
+    }
+
     this.syncToReact();
-    this.scheduleOverflowCheck();
   }
 
   insertTable(rows: number, cols: number): void {
@@ -416,12 +433,19 @@ export class LayoutEngine {
   }
 
   deleteSelectedBlocks(): void {
-    if (!this.activeCellId || !this.focusedBlockId) return;
+    if (!this.activeCellId || !this.focusedBlockId || !this.cellPool) return;
+
+    const cell = this.cellPool.get(this.activeCellId);
+    if (!cell) return;
+
+    cell.removeBlock(this.focusedBlockId);
+
     const page = getPageForCell(this.pages, this.activeCellId);
-    if (!page) return;
-    this.updatePageLayout(page.id, removeBlockFromCell(page.layout, this.activeCellId, this.focusedBlockId));
+    if (page) {
+      this.updatePageLayout(page.id, removeBlockFromCell(page.layout, this.activeCellId, this.focusedBlockId));
+    }
+
     this.focusedBlockId = null;
-    this.fullRender();
     this.syncToReact();
   }
 
@@ -450,10 +474,11 @@ export class LayoutEngine {
 
     const target = e.target as HTMLElement;
     const blockEl = target.closest('[data-block-id]') as HTMLElement;
+
     if (blockEl) {
       const blockId = blockEl.dataset.blockId!;
-      const registry = this.cellRenderer.getRegistry();
-      const node = registry.get(blockId);
+      const registry = this.cellPool?.getRegistry();
+      const node = registry?.get(blockId);
       if (node?.isEditable() && node.kernel) {
         this.focusedBlockId = blockId;
         node.kernel.focus();
@@ -465,6 +490,7 @@ export class LayoutEngine {
       return;
     }
 
+    // Clicked empty area of cell — ensure editable and focus
     this.autoFocusInCell(cellId);
     this.emitToolbarUpdate();
   }
@@ -520,7 +546,6 @@ export class LayoutEngine {
       { label: 'Split Vertical', action: () => this.split('vertical', cellId) },
     ];
 
-    // Merge option
     const page = getPageForCell(this.pages, cellId);
     if (page) {
       const parent = findParent(page.layout, cellId);
@@ -529,12 +554,11 @@ export class LayoutEngine {
       }
     }
 
-    // Add new page option
     items.push({ label: 'Add Page After', action: () => {
       if (page) {
         const newPage = createPage();
         this.pages = addPageAfter(this.pages, page.id, newPage);
-        this.fullRender();
+        this.reconciler?.reconcilePages(this.container!, this.pages);
         this.syncToReact();
       }
     }});
@@ -577,121 +601,76 @@ export class LayoutEngine {
 
   private setActiveCell(cellId: string): void {
     if (this.activeCellId && this.activeCellId !== cellId) {
-      const prevHandle = this.cellRenderer.getCellHandle(this.activeCellId);
-      prevHandle?.element.classList.remove('bsp-cell--active');
+      const prevCell = this.cellPool?.get(this.activeCellId);
+      prevCell?.setActive(false);
       this.focusedBlockId = null;
     }
 
     this.activeCellId = cellId;
-    this.activePageId = this.cellRenderer.getPageIdForCell(cellId) ?? null;
+    this.activePageId = this.reconciler?.getPageIdForCell(cellId) ?? null;
 
-    const handle = this.cellRenderer.getCellHandle(cellId);
-    handle?.element.classList.add('bsp-cell--active');
+    const cell = this.cellPool?.get(cellId);
+    cell?.setActive(true);
   }
 
+  /**
+   * Ensure a cell has at least one editable block and focus it.
+   * This is a LOCAL operation — no global render, no sync race conditions.
+   */
   private autoFocusInCell(cellId: string): void {
-    const page = getPageForCell(this.pages, cellId);
-    if (!page) return;
+    const cell = this.cellPool?.get(cellId);
+    if (!cell) return;
 
-    const cell = findNode(page.layout, cellId) as LeafNode | null;
-    if (!cell || cell.type !== 'leaf') return;
+    if (cell.isEmpty()) {
+      // Local operation: add a paragraph block directly to the cell
+      const newBlock = cell.ensureEditable();
+      this.focusedBlockId = newBlock.id;
 
-    // Check live DOM for content, not just layout tree (which may be stale)
-    const handle = this.cellRenderer.getCellHandle(cellId);
-    const hasLiveContent = handle && handle.blockNodes.length > 0;
-
-    if (cell.blocks.length === 0 && !hasLiveContent) {
-      const newBlock: Block = { type: 'paragraph', content: [], id: generateBlockId() };
-      this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, newBlock));
-      this.fullRender();
-      this.syncToReact();
+      // Update tree for serialization
+      const page = getPageForCell(this.pages, cellId);
+      if (page) {
+        const blockData: Block = { type: 'paragraph', content: [], id: newBlock.id };
+        this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, blockData));
+      }
 
       requestAnimationFrame(() => {
-        this.focusBlockInCell(cellId, newBlock.id!);
+        if (newBlock.kernel) {
+          newBlock.kernel.focus();
+        }
       });
       return;
     }
-    if (!handle) return;
 
-    for (let i = handle.blockNodes.length - 1; i >= 0; i--) {
-      const bn = handle.blockNodes[i];
-      if (bn.isEditable() && bn.kernel) {
-        this.focusedBlockId = bn.id;
-        bn.kernel.focus();
-        return;
-      }
-    }
-
-    if (handle.blockNodes.length > 0) {
-      this.focusedBlockId = handle.blockNodes[0].id;
+    // Focus the last editable block
+    const focused = cell.focusLastEditable();
+    if (focused) {
+      this.focusedBlockId = focused.id;
+    } else if (cell.blockCount() > 0) {
+      this.focusedBlockId = cell.getBlockNodes()[0].id;
     }
   }
 
   private getActiveKernel(): ITextKernel | null {
-    if (!this.focusedBlockId) return null;
-    const registry = this.cellRenderer.getRegistry();
+    if (!this.focusedBlockId || !this.cellPool) return null;
+    const registry = this.cellPool.getRegistry();
     const node = registry.get(this.focusedBlockId);
     return node?.kernel ?? null;
   }
 
   private getFocusedBlockNode(): BlockNode | null {
-    if (!this.focusedBlockId) return null;
-    return this.cellRenderer.getRegistry().get(this.focusedBlockId) ?? null;
+    if (!this.focusedBlockId || !this.cellPool) return null;
+    return this.cellPool.getRegistry().get(this.focusedBlockId) ?? null;
   }
 
-  private focusBlockInCell(cellId: string, blockId: string): void {
-    this.setActiveCell(cellId);
-    this.focusedBlockId = blockId;
-
-    const registry = this.cellRenderer.getRegistry();
-    const node = registry.get(blockId);
-    if (node?.isEditable() && node.kernel) {
-      node.kernel.focus();
-    }
-    this.emitToolbarUpdate();
-  }
-
-  /**
-   * Sync live TextKernel content into the layout tree.
-   * Called before structural operations (split, merge) so they operate
-   * on the latest content. NOT called during regular typing — only before
-   * operations that destroy and re-create TextKernels.
-   */
-  private syncLiveContentToTree(): void {
-    for (const page of this.pages) {
-      const leaves = getAllLeaves(page.layout);
-      let updatedLayout = page.layout;
-      for (const leaf of leaves) {
-        const handle = this.cellRenderer.getCellHandle(leaf.id);
-        if (handle) {
-          const liveBlocks = handle.blockNodes.map(bn => bn.getData());
-          updatedLayout = updateLeafBlocks(updatedLayout, leaf.id, liveBlocks);
-        }
-      }
-      if (updatedLayout !== page.layout) {
-        this.updatePageLayout(page.id, updatedLayout);
-      }
-    }
-  }
-
-  /** Update a specific page's layout tree */
   private updatePageLayout(pageId: string, newLayout: LayoutNode): void {
     this.pages = this.pages.map(p =>
       p.id === pageId ? { ...p, layout: newLayout } : p
     );
   }
 
-  /** Sync live content then re-render. Use when content may have changed. */
-  private fullRender(): void {
-    if (!this.container) return;
-    this.syncLiveContentToTree();
-    this.cellRenderer.renderPages(this.container, this.pages);
-  }
-
-  /** Re-render without syncing. Use when we already synced or tree is authoritative. */
-  private renderPages(): void {
-    if (!this.container) return;
-    this.cellRenderer.renderPages(this.container, this.pages);
+  private getFirstLeafId(node: LayoutNode): string | null {
+    if (node.type === 'leaf') return node.id;
+    return this.getFirstLeafId(node.first);
   }
 
   private emitToolbarUpdate(): void {
@@ -705,74 +684,22 @@ export class LayoutEngine {
     }, this.config.debounceMs);
   }
 
-  /** Schedule an overflow check after the DOM has painted (used for structural changes) */
-  private scheduleOverflowCheck(): void {
-    if (this.overflowTimer) clearTimeout(this.overflowTimer);
-    this.overflowTimer = setTimeout(() => {
-      requestAnimationFrame(() => {
-        this.checkOverflow();
-      });
-    }, 50); // Short delay for structural changes (split, resize)
-  }
-
-  /** Debounced overflow check for typing — longer delay to avoid per-keystroke checks */
-  private debouncedOverflowCheck(): void {
-    if (this.overflowTimer) clearTimeout(this.overflowTimer);
-    this.overflowTimer = setTimeout(() => {
-      requestAnimationFrame(() => {
-        this.checkOverflow();
-      });
-    }, 500); // Longer delay for typing — only check after user pauses
-  }
-
-  /** Run overflow detection and resolution */
-  private checkOverflow(): void {
-    const oldPageCount = this.pages.length;
-
-    const result = this.overflowResolver.resolve(
-      this.pages,
-      (cellId) => this.cellRenderer.getCellHandle(cellId),
-    );
-
-    if (result.changed) {
-      this.pages = result.pages;
-
-      // If page count changed (new pages created or empty removed), re-render
-      // Use renderPages() not fullRender() — overflow resolver already set tree data
-      if (result.pages.length !== oldPageCount) {
-        this.renderPages();
-        // After full re-render, check again (new pages may also overflow)
-        requestAnimationFrame(() => this.checkOverflow());
-      } else {
-        // Same page count — selectively re-render affected pages
-        for (const pageId of result.affectedPageIds) {
-          const page = this.pages.find(p => p.id === pageId);
-          if (page) {
-            this.cellRenderer.rerenderPage(pageId, page);
-          }
-        }
-      }
-      this.syncToReact();
-    }
-  }
-
-  /** Rebuild DocumentTree from all pages and emit onChange.
-   *  IMPORTANT: Does NOT write back to the layout tree — only reads live content
-   *  for the React state. The layout tree is only modified by explicit operations
-   *  (split, merge, overflow). This prevents lossy round-trip serialization. */
+  /**
+   * Rebuild DocumentTree from all live cells and emit onChange.
+   * Reads directly from CellPool — no stale tree data, no sync race.
+   */
   private syncToReact(): void {
-    // Collect live content from all pages (read-only — don't update layout tree)
+    if (!this.cellPool) return;
+
     const allBlocks: Block[] = [];
     for (const page of this.pages) {
       const leaves = getAllLeaves(page.layout);
       for (const leaf of leaves) {
-        const handle = this.cellRenderer.getCellHandle(leaf.id);
-        if (handle) {
-          for (const bn of handle.blockNodes) {
-            allBlocks.push(bn.getData());
-          }
+        const cell = this.cellPool.get(leaf.id);
+        if (cell) {
+          allBlocks.push(...cell.getContent());
         } else {
-          // Fallback to tree data for cells without handles
+          // Fallback to tree data for cells not yet in pool
           allBlocks.push(...leaf.blocks);
         }
       }

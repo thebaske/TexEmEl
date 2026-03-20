@@ -60,28 +60,35 @@ export function createDefaultLayout(blocks: Block[] = []): LeafNode {
 
 /**
  * Split a leaf cell into two.
- * The original content stays in the first child; the second child is empty.
+ * The original leaf KEEPS its ID (first child) — this is critical for
+ * the reconciler to reuse the existing DOM/ProseMirror instances.
+ * Only the new sibling cell gets a fresh ID.
+ *
+ * Returns { newTree, newCellId } so callers know the new cell's ID.
  */
 export function splitCell(
   root: LayoutNode,
   cellId: string,
   direction: SplitDirection,
   ratio = 0.5,
-): LayoutNode {
-  return mapNode(root, cellId, (leaf) => {
+): { tree: LayoutNode; newCellId: string } {
+  const newCellId = generateBlockId();
+  const tree = mapNode(root, cellId, (leaf) => {
     if (leaf.type !== 'leaf') return leaf;
     return createSplit(
       direction,
-      createLeaf(leaf.blocks),
-      createLeaf([]),
+      leaf,                            // ← KEEPS original ID + content
+      createLeaf([], newCellId),       // ← only new cell gets new ID
       ratio,
     );
   });
+  return { tree, newCellId };
 }
 
 /**
  * Split a leaf cell into two with specified content for each half.
- * Used for content-aware splitting (e.g., user splits at a row).
+ * Used for content-aware splitting (e.g., overflow splits a cell).
+ * The first child KEEPS the original cell ID.
  */
 export function splitCellWithContent(
   root: LayoutNode,
@@ -90,16 +97,18 @@ export function splitCellWithContent(
   ratio: number,
   firstBlocks: Block[],
   secondBlocks: Block[],
-): LayoutNode {
-  return mapNode(root, cellId, (leaf) => {
+): { tree: LayoutNode; newCellId: string } {
+  const newCellId = generateBlockId();
+  const tree = mapNode(root, cellId, (leaf) => {
     if (leaf.type !== 'leaf') return leaf;
     return createSplit(
       direction,
-      createLeaf(firstBlocks),
-      createLeaf(secondBlocks),
+      { ...leaf, blocks: firstBlocks },   // ← KEEPS original ID
+      createLeaf(secondBlocks, newCellId), // ← new ID for second half
       ratio,
     );
   });
+  return { tree, newCellId };
 }
 
 /**

@@ -1,12 +1,12 @@
 // ============================================================================
-// Toolbar — Full formatting toolbar for BlockEngine
+// Toolbar — Full formatting toolbar for LayoutDirector
 // ============================================================================
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { BlockEngine } from '../../core/engine/BlockEngine';
+import type { LayoutDirector } from '../../core/layout/LayoutDirector';
 
 interface ToolbarProps {
-  engine: BlockEngine | null;
+  engine: LayoutDirector | null;
   /** Incremented by App to force re-render when engine state changes */
   version?: number;
 }
@@ -399,7 +399,7 @@ function ColorPicker({ label, title, colors, currentColor, onChange, disabled, t
 }
 
 interface AlignmentGroupProps {
-  engine: BlockEngine | null;
+  engine: LayoutDirector | null;
 }
 
 function AlignmentGroup({ engine }: AlignmentGroupProps) {
@@ -453,7 +453,7 @@ function AlignIcon({ align }: { align: string }) {
 }
 
 interface LinkButtonProps {
-  engine: BlockEngine | null;
+  engine: LayoutDirector | null;
   hasLink: boolean;
 }
 
@@ -486,7 +486,7 @@ function LinkButton({ engine, hasLink }: LinkButtonProps) {
 // --- Table Grid Picker ---
 
 interface TableGridPickerProps {
-  engine: BlockEngine | null;
+  engine: LayoutDirector | null;
 }
 
 function TableGridPicker({ engine }: TableGridPickerProps) {
@@ -565,7 +565,7 @@ function TableGridPicker({ engine }: TableGridPickerProps) {
 // --- Image Insert Button ---
 
 interface ImageInsertButtonProps {
-  engine: BlockEngine | null;
+  engine: LayoutDirector | null;
 }
 
 function ImageInsertButton({ engine }: ImageInsertButtonProps) {

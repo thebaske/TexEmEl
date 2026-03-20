@@ -72,6 +72,13 @@ export interface BlockBase {
   splitId?: string;
   /** Which half of a split paragraph this is */
   splitPart?: 'top' | 'bottom';
+  /**
+   * Lossless ProseMirror document JSON snapshot.
+   * When present, TextKernel restores from this instead of the lossy InlineContent[].
+   * Set by syncLiveContentToTree() before structural operations (split, merge).
+   * Stripped on export to keep DocumentTree format-agnostic.
+   */
+  pmDocJson?: Record<string, unknown>;
 }
 
 export interface ParagraphBlock extends BlockBase {

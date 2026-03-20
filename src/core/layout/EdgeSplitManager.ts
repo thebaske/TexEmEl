@@ -19,8 +19,8 @@ export interface EdgeSplitCallbacks {
 
 type Edge = 'top' | 'bottom' | 'left' | 'right';
 
-const EDGE_THRESHOLD = 8; // pixels from edge to trigger
-const MIN_DRAG_DISTANCE = 20; // minimum drag distance to confirm split
+const EDGE_THRESHOLD = 12; // pixels from edge to trigger
+const MIN_DRAG_DISTANCE = 16; // minimum drag distance to confirm split
 
 export class EdgeSplitManager {
   private container: HTMLElement;
@@ -153,7 +153,7 @@ export class EdgeSplitManager {
     document.removeEventListener('pointerup', this.onPointerUp);
   }
 
-  /** Detect if pointer is near a cell edge */
+  /** Detect if pointer is near a cell edge — returns the CLOSEST edge */
   private detectEdge(cell: HTMLElement, x: number, y: number): Edge | null {
     const rect = cell.getBoundingClientRect();
     const fromTop = y - rect.top;
@@ -161,11 +161,17 @@ export class EdgeSplitManager {
     const fromLeft = x - rect.left;
     const fromRight = rect.right - x;
 
-    if (fromTop < EDGE_THRESHOLD) return 'top';
-    if (fromBottom < EDGE_THRESHOLD) return 'bottom';
-    if (fromLeft < EDGE_THRESHOLD) return 'left';
-    if (fromRight < EDGE_THRESHOLD) return 'right';
-    return null;
+    // Find the minimum distance to any edge
+    const minDist = Math.min(fromTop, fromBottom, fromLeft, fromRight);
+
+    // Only trigger if within the threshold
+    if (minDist >= EDGE_THRESHOLD) return null;
+
+    // Return the closest edge
+    if (minDist === fromTop) return 'top';
+    if (minDist === fromBottom) return 'bottom';
+    if (minDist === fromLeft) return 'left';
+    return 'right';
   }
 
   private isHorizontalEdge(edge: Edge): boolean {

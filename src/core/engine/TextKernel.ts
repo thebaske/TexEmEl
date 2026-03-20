@@ -188,24 +188,6 @@ export class TextKernel implements ITextKernel {
 
     const doc = this.blockToDoc(block);
 
-    // Keymap: Enter at end of document creates a new block instead of new paragraph inside
-    const enterAtEndKeymap = keymap({
-      'Enter': (state) => {
-        // Only intercept if cursor is at the very end of the document
-        const { $head } = state.selection;
-        const atEnd = $head.pos === state.doc.content.size - 1;
-        // And the current last block is empty (user pressed Enter on an empty line)
-        const lastNode = state.doc.lastChild;
-        const lastIsEmpty = lastNode && lastNode.content.size === 0;
-
-        if (atEnd && lastIsEmpty && this.enterAtEndCallbacks.length > 0) {
-          for (const cb of this.enterAtEndCallbacks) cb();
-          return true;
-        }
-        return false;
-      },
-    });
-
     const state = EditorState.create({
       doc,
       schema: this.schema,
@@ -213,7 +195,6 @@ export class TextKernel implements ITextKernel {
         history(),
         buildKeymaps(this.schema),
         buildInputRules(this.schema),
-        enterAtEndKeymap,
         keymap(baseKeymap),
       ],
     });

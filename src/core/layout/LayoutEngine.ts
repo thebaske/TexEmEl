@@ -44,8 +44,6 @@ import {
   createPage,
   addPageAfter,
   getPageForCell,
-  isLastPage,
-  isCellAtPageBottom,
   collectAllBlocks,
 } from './PageModel';
 
@@ -126,21 +124,6 @@ export class LayoutEngine {
       kernel.onSelectionUpdate?.(() => {
         this.emitToolbarUpdate();
       });
-
-      kernel.onEnterAtEnd?.(() => {
-        if (this.activeCellId) {
-          const page = getPageForCell(this.pages, this.activeCellId);
-          if (!page) return;
-          const cell = findNode(page.layout, this.activeCellId) as LeafNode | null;
-          if (cell && cell.type === 'leaf') {
-            const newBlock: Block = { type: 'paragraph', content: [], id: generateBlockId() };
-            this.updatePageLayout(page.id, insertBlockInCell(page.layout, this.activeCellId, newBlock));
-            this.fullRender();
-            this.focusBlockInCell(this.activeCellId, newBlock.id!);
-            this.scheduleOverflowCheck();
-          }
-        }
-      });
     });
   }
 
@@ -177,21 +160,9 @@ export class LayoutEngine {
       },
     });
 
-    // Set up edge split manager
+    // Set up edge split manager — edge pulls always split the cell
     this.edgeSplitManager = new EdgeSplitManager(container, {
       onEdgeSplit: (cellId, direction, ratio) => {
-        // Check if this is a bottom-edge pull on the last page
-        const page = getPageForCell(this.pages, cellId);
-        if (page && direction === 'horizontal' &&
-            isLastPage(this.pages, page.id) &&
-            isCellAtPageBottom(page, cellId)) {
-          // Create new page instead of splitting
-          const newPage = createPage();
-          this.pages = addPageAfter(this.pages, page.id, newPage);
-          this.fullRender();
-          this.syncToReact();
-          return;
-        }
         this.split(direction, cellId, ratio);
       },
     });
@@ -199,6 +170,9 @@ export class LayoutEngine {
     // Global keyboard handlers
     container.addEventListener('keydown', (e) => this.handleKeyDown(e));
     container.addEventListener('contextmenu', (e) => this.handleContextMenu(e));
+
+    // Immediate overflow check on mount
+    requestAnimationFrame(() => this.checkOverflow());
   }
 
   /** Update from external source (file open) */
@@ -211,7 +185,8 @@ export class LayoutEngine {
     this.activeCellId = null;
     this.focusedBlockId = null;
     this.fullRender();
-    this.scheduleOverflowCheck();
+    // Immediate overflow check for file open (no debounce)
+    requestAnimationFrame(() => this.checkOverflow());
   }
 
   /** Load a saved layout */
@@ -700,6 +675,8 @@ export class LayoutEngine {
 
   /** Run overflow detection and resolution */
   private checkOverflow(): void {
+    const oldPageCount = this.pages.length;
+
     const result = this.overflowResolver.resolve(
       this.pages,
       (cellId) => this.cellRenderer.getCellHandle(cellId),
@@ -707,16 +684,20 @@ export class LayoutEngine {
 
     if (result.changed) {
       this.pages = result.pages;
-      // Re-render affected pages
-      for (const pageId of result.affectedPageIds) {
-        const page = this.pages.find(p => p.id === pageId);
-        if (page) {
-          this.cellRenderer.rerenderPage(pageId, page);
-        }
-      }
-      // New pages need full re-render
-      if (result.pages.length !== this.pages.length) {
+
+      // If page count changed (new pages created or empty removed), do full re-render
+      if (result.pages.length !== oldPageCount) {
         this.fullRender();
+        // After full re-render, check again (new pages may also overflow)
+        requestAnimationFrame(() => this.checkOverflow());
+      } else {
+        // Same page count — selectively re-render affected pages
+        for (const pageId of result.affectedPageIds) {
+          const page = this.pages.find(p => p.id === pageId);
+          if (page) {
+            this.cellRenderer.rerenderPage(pageId, page);
+          }
+        }
       }
       this.syncToReact();
     }

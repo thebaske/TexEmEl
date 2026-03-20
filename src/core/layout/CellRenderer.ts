@@ -222,7 +222,7 @@ export class CellRenderer {
       first.style.height = `calc(${pct1}% - 2px)`;
       first.style.width = '100%';
     }
-    first.style.flex = 'none';
+    first.style.overflow = 'auto';
 
     // Resize handle (the draggable border between split children)
     const resizeHandle = document.createElement('div');
@@ -241,7 +241,7 @@ export class CellRenderer {
       second.style.height = `calc(${pct2}% - 2px)`;
       second.style.width = '100%';
     }
-    second.style.flex = 'none';
+    second.style.overflow = 'auto';
 
     container.appendChild(first);
     container.appendChild(resizeHandle);

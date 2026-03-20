@@ -25,8 +25,7 @@
 .bsp-split-child {
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
-  flex-shrink: 1;
+  overflow: auto;
 }
 
 /* --- Resize Handle (the draggable border between splits) --- */
@@ -61,16 +60,14 @@
   position: relative;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
 }
 
 .bsp-cell-content {
-  flex: 1 1 0;
+  flex: 1;
   padding: 12px 16px;
   outline: none;
   overflow: auto;
   min-height: 0;
-  min-width: 0;
 }
 
 /* Empty cell placeholder */
@@ -81,25 +78,50 @@
 }
 
 .bsp-cell-empty::before {
-  content: 'Double-click to type, right-click to split';
+  content: 'Click to type, right-click to split';
   color: var(--text-muted, #94a3b8);
   font-size: 13px;
   font-style: italic;
   pointer-events: none;
 }
 
-/* Active cell highlight */
-.bsp-cell--active {
+/* Active cell highlight — only show when multiple cells exist */
+.bsp-split .bsp-cell--active {
   box-shadow: inset 0 0 0 2px var(--accent, #3b82f6);
 }
 
-/* Cell hover */
-.bsp-cell:hover {
-  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.2);
+/* --- Edge zones: cursor changes near cell edges to hint at split --- */
+.bsp-cell-edge {
+  position: absolute;
+  z-index: 4;
 }
 
-.bsp-cell--active:hover {
-  box-shadow: inset 0 0 0 2px var(--accent, #3b82f6);
+.bsp-cell-edge--top {
+  top: 0; left: 0; right: 0;
+  height: 6px;
+  cursor: row-resize;
+}
+
+.bsp-cell-edge--bottom {
+  bottom: 0; left: 0; right: 0;
+  height: 6px;
+  cursor: row-resize;
+}
+
+.bsp-cell-edge--left {
+  top: 0; bottom: 0; left: 0;
+  width: 6px;
+  cursor: col-resize;
+}
+
+.bsp-cell-edge--right {
+  top: 0; bottom: 0; right: 0;
+  width: 6px;
+  cursor: col-resize;
+}
+
+.bsp-cell-edge:hover {
+  background: rgba(59, 130, 246, 0.15);
 }
 
 /* --- Context Menu --- */
@@ -130,7 +152,7 @@
   background: var(--bg-tertiary, #f1f5f9);
 }
 
-/* --- Block styles inside cells (inherit from engine.css) --- */
+/* --- Block styles inside cells --- */
 .bsp-cell-content .block {
   position: relative;
   border-radius: 2px;
@@ -225,74 +247,23 @@
   height: 0;
 }
 
-/* --- Cell Drag Handle --- */
-.bsp-cell-drag-handle {
+/* --- Split preview line during edge drag --- */
+.bsp-split-preview {
   position: absolute;
-  top: 4px;
-  left: 4px;
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 3px;
-  background: var(--bg-secondary, #f1f5f9);
-  color: var(--text-muted, #94a3b8);
-  font-size: 12px;
-  cursor: grab;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  z-index: 10;
-  user-select: none;
-}
-
-.bsp-cell:hover .bsp-cell-drag-handle {
-  opacity: 1;
-}
-
-.bsp-cell-drag-handle:hover {
   background: var(--accent, #3b82f6);
-  color: #fff;
-}
-
-/* Dragging state */
-.bsp-cell--dragging {
-  opacity: 0.5;
-}
-
-/* --- Drag Ghost --- */
-.bsp-drag-ghost {
-  position: fixed;
-  padding: 8px 12px;
-  background: var(--bg, #fff);
-  border: 1px solid var(--accent, #3b82f6);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-  font-size: 12px;
-  color: var(--text, #1e293b);
+  z-index: 20;
   pointer-events: none;
-  z-index: 10001;
-  white-space: nowrap;
+  opacity: 0.6;
 }
 
-/* --- Drop Indicator --- */
-.bsp-drop-indicator {
-  position: fixed;
-  pointer-events: none;
-  z-index: 10000;
-  border-radius: 4px;
-  transition: all 0.1s ease;
+.bsp-split-preview--horizontal {
+  left: 0;
+  right: 0;
+  height: 3px;
 }
 
-.bsp-drop-indicator--center {
-  background: rgba(59, 130, 246, 0.1);
-  border: 2px dashed rgba(59, 130, 246, 0.5);
-}
-
-.bsp-drop-indicator--top,
-.bsp-drop-indicator--bottom,
-.bsp-drop-indicator--left,
-.bsp-drop-indicator--right {
-  background: rgba(59, 130, 246, 0.15);
-  border: 2px solid rgba(59, 130, 246, 0.4);
+.bsp-split-preview--vertical {
+  top: 0;
+  bottom: 0;
+  width: 3px;
 }

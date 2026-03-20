@@ -20,7 +20,7 @@ import type { BlockNode } from '../engine/BlockNode';
 import { generateBlockId, assignBlockIds } from '../engine/BlockId';
 import { CellRenderer } from './CellRenderer';
 import { SplitResizeManager } from './SplitResizeManager';
-import { CellDragManager } from './CellDragManager';
+import { EdgeSplitManager } from './EdgeSplitManager';
 import {
   type LayoutNode,
   type LeafNode,
@@ -65,7 +65,7 @@ export class LayoutEngine {
   // Subsystems
   private cellRenderer: CellRenderer;
   private resizeManager: SplitResizeManager | null = null;
-  private dragManager: CellDragManager | null = null;
+  private edgeSplitManager: EdgeSplitManager | null = null;
 
   // TextKernel factory — injected by consumer
   private kernelFactory: ((node: BlockNode, el: HTMLElement, block: Block) => ITextKernel) | null = null;
@@ -152,82 +152,18 @@ export class LayoutEngine {
       },
     });
 
-    // Set up drag manager for moving content between cells
-    this.initDragManager();
+    // Set up edge split manager (pull from cell edges to split)
+    this.edgeSplitManager = new EdgeSplitManager(container, {
+      onEdgeSplit: (cellId, direction, ratio) => {
+        this.split(direction, cellId, ratio);
+      },
+    });
 
     // Global keyboard handlers
     container.addEventListener('keydown', (e) => this.handleKeyDown(e));
 
     // Context menu for split/merge
     container.addEventListener('contextmenu', (e) => this.handleContextMenu(e));
-  }
-
-  /** Initialize or re-initialize the cell drag manager */
-  private initDragManager(): void {
-    if (!this.container) return;
-    this.dragManager?.destroy();
-    this.dragManager = new CellDragManager(this.container, {
-      onMoveContent: (fromCellId, toCellId) => {
-        this.moveCellContent(fromCellId, toCellId, true);
-      },
-      onSplitAndMove: (fromCellId, toCellId, direction, insertFirst) => {
-        this.splitAndMove(fromCellId, toCellId, direction, insertFirst);
-      },
-    });
-  }
-
-  /** Split a target cell and move content from source into the new half */
-  private splitAndMove(fromCellId: string, toCellId: string, direction: SplitDirection, insertFirst: boolean): void {
-    // Get source blocks before modifying the tree
-    const sourceNode = findNode(this.layout, fromCellId) as LeafNode | null;
-    if (!sourceNode || sourceNode.type !== 'leaf') return;
-    const blocks = [...sourceNode.blocks];
-
-    // Clear source cell
-    this.layout = updateLeafBlocks(this.layout, fromCellId, []);
-
-    // Split target cell
-    this.layout = splitCell(this.layout, toCellId, direction);
-
-    // After splitCell, toCellId no longer exists — it was replaced by a new split.
-    // The new split's first child has the original blocks, second is empty.
-    // We need to find the new empty leaf and put our content there.
-    const allLeaves = getAllLeaves(this.layout);
-    const emptyLeaf = allLeaves.find(l => l.blocks.length === 0 && l.id !== fromCellId);
-
-    if (emptyLeaf) {
-      if (insertFirst) {
-        // We want dragged content in the first position — swap the new split's children
-        // Actually, we need to put blocks in the empty leaf and then let the user see it
-        // in the correct position. Since splitCell puts original content in first, empty in second:
-        // - insertFirst=true (top/left): swap original into second, put dragged into first
-        //   → Simpler: just put dragged blocks into the empty leaf. The position depends on
-        //     whether it's first or second child of the split.
-        // For now, just put blocks in the empty leaf — the visual position is handled by
-        // which child the empty leaf is.
-        this.layout = updateLeafBlocks(this.layout, emptyLeaf.id, blocks);
-      } else {
-        this.layout = updateLeafBlocks(this.layout, emptyLeaf.id, blocks);
-      }
-    }
-
-    // Auto-merge the source if it's now empty
-    this.layout = this.autoMergeEmptyLeaf(this.layout, fromCellId);
-
-    this.fullRender();
-    this.initDragManager(); // Re-attach drag handles to new cells
-    this.syncToReact();
-  }
-
-  /** If a leaf is empty and has a sibling, merge it away */
-  private autoMergeEmptyLeaf(root: LayoutNode, leafId: string): LayoutNode {
-    const leaf = findNode(root, leafId);
-    if (!leaf || leaf.type !== 'leaf' || leaf.blocks.length > 0) return root;
-
-    const parent = findParent(root, leafId);
-    if (!parent) return root;
-
-    return mergeCells(root, parent.id);
   }
 
   /** Update from external source (file open) */
@@ -254,7 +190,7 @@ export class LayoutEngine {
   destroy(): void {
     if (this.syncTimer) clearTimeout(this.syncTimer);
     this.resizeManager?.destroy();
-    this.dragManager?.destroy();
+    this.edgeSplitManager?.destroy();
     this.cellRenderer.destroy();
     this.onChangeCallbacks = [];
     this.onToolbarUpdateCallbacks = [];
@@ -676,10 +612,6 @@ export class LayoutEngine {
   private fullRender(): void {
     if (!this.container) return;
     this.cellRenderer.render(this.container, this.layout);
-    // Re-attach drag handles after DOM rebuild
-    if (this.dragManager) {
-      this.dragManager.attachDragHandles();
-    }
   }
 
   private emitToolbarUpdate(): void {

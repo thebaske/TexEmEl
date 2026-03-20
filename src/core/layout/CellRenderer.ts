@@ -9,6 +9,7 @@ import type { LayoutNode, SplitNode, LeafNode } from './LayoutTree';
 import type { Block } from '../model/DocumentTree';
 import type { BlockNode } from '../engine/BlockNode';
 import type { MountKernelFn } from '../engine/BlockRenderer';
+import type { Page } from './PageModel';
 import { BlockRenderer } from '../engine/BlockRenderer';
 import { BlockRegistry } from '../engine/BlockRegistry';
 
@@ -44,6 +45,8 @@ export class CellRenderer {
   private cellMap = new Map<string, CellHandle>();
   /** Maps split IDs to their resize handle elements */
   private splitHandleMap = new Map<string, HTMLElement>();
+  /** Maps cell IDs to page IDs */
+  private pageMap = new Map<string, string>();
   /** The root container element */
   // @ts-ignore — used for future operations
   private _rootElement: HTMLElement | null = null;
@@ -72,17 +75,114 @@ export class CellRenderer {
 
   // --- Render ---
 
-  /** Full render of the layout tree into the container */
+  /** Full render of a single layout tree into the container (legacy single-page) */
   render(container: HTMLElement, layout: LayoutNode): void {
     container.innerHTML = '';
     this.registry.clear();
     this.cellMap.clear();
     this.splitHandleMap.clear();
+    this.pageMap.clear();
 
     const el = this.renderNode(layout);
     el.classList.add('bsp-root');
     container.appendChild(el);
     this._rootElement = el;
+  }
+
+  /** Render multiple pages into the container */
+  renderPages(container: HTMLElement, pages: Page[]): void {
+    container.innerHTML = '';
+    this.registry.clear();
+    this.cellMap.clear();
+    this.splitHandleMap.clear();
+    this.pageMap.clear();
+
+    // Create pages container
+    const pagesContainer = document.createElement('div');
+    pagesContainer.classList.add('bsp-pages-container');
+
+    for (const page of pages) {
+      const pageEl = document.createElement('div');
+      pageEl.classList.add('bsp-page');
+      pageEl.dataset.pageId = page.id;
+
+      // Render the BSP tree inside this page
+      const bspRoot = this.renderNode(page.layout);
+      bspRoot.classList.add('bsp-root');
+      pageEl.appendChild(bspRoot);
+
+      // Track which cells belong to which page
+      const leaves = this.getLeafCellIds(page.layout);
+      for (const cellId of leaves) {
+        this.pageMap.set(cellId, page.id);
+      }
+
+      pagesContainer.appendChild(pageEl);
+    }
+
+    container.appendChild(pagesContainer);
+    this._rootElement = pagesContainer;
+  }
+
+  /** Re-render a single page (for selective updates after overflow) */
+  rerenderPage(pageId: string, page: Page): void {
+    const pageEl = document.querySelector(`[data-page-id="${pageId}"]`) as HTMLElement;
+    if (!pageEl) return;
+
+    // Clean up cells from this page
+    const cellsToRemove: string[] = [];
+    for (const [cellId, pId] of this.pageMap) {
+      if (pId === pageId) cellsToRemove.push(cellId);
+    }
+    for (const cellId of cellsToRemove) {
+      const handle = this.cellMap.get(cellId);
+      if (handle) {
+        for (const bn of handle.blockNodes) {
+          this.registry.unregister(bn.id);
+          bn.destroy();
+        }
+        this.cellMap.delete(cellId);
+      }
+      this.pageMap.delete(cellId);
+    }
+
+    pageEl.innerHTML = '';
+    const bspRoot = this.renderNode(page.layout);
+    bspRoot.classList.add('bsp-root');
+    pageEl.appendChild(bspRoot);
+
+    const leaves = this.getLeafCellIds(page.layout);
+    for (const cellId of leaves) {
+      this.pageMap.set(cellId, page.id);
+    }
+  }
+
+  /** Get the page ID that contains a given cell */
+  getPageIdForCell(cellId: string): string | undefined {
+    return this.pageMap.get(cellId);
+  }
+
+  /** Measure cell content vs available space */
+  measureCellContent(cellId: string): { contentHeight: number; cellHeight: number } | null {
+    const handle = this.cellMap.get(cellId);
+    if (!handle) return null;
+    return {
+      contentHeight: handle.contentElement.scrollHeight,
+      cellHeight: handle.contentElement.clientHeight,
+    };
+  }
+
+  /** Get block DOM elements for a cell (for overflow measurement) */
+  getBlockElements(cellId: string): HTMLElement[] {
+    const handle = this.cellMap.get(cellId);
+    if (!handle) return [];
+    return handle.blockNodes.map(bn => bn.element);
+  }
+
+  /** Collect all leaf cell IDs from a layout tree */
+  private getLeafCellIds(node: LayoutNode): string[] {
+    if (node.type === 'leaf') return [node.id];
+    return [...this.getLeafCellIds(node.first), ...this.getLeafCellIds(node.second)];
   }
 
   /** Re-render a single cell's content (after block changes) */
@@ -142,6 +242,7 @@ export class CellRenderer {
     this.registry.clear();
     this.cellMap.clear();
     this.splitHandleMap.clear();
+    this.pageMap.clear();
     this._rootElement = null;
   }
 
@@ -222,7 +323,7 @@ export class CellRenderer {
       first.style.height = `calc(${pct1}% - 2px)`;
       first.style.width = '100%';
     }
-    first.style.overflow = 'auto';
+    first.style.overflow = 'hidden';
 
     // Resize handle (the draggable border between split children)
     const resizeHandle = document.createElement('div');
@@ -241,7 +342,7 @@ export class CellRenderer {
       second.style.height = `calc(${pct2}% - 2px)`;
       second.style.width = '100%';
     }
-    second.style.overflow = 'auto';
+    second.style.overflow = 'hidden';
 
     container.appendChild(first);
     container.appendChild(resizeHandle);

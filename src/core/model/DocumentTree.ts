@@ -68,6 +68,10 @@ export interface BlockBase {
   id?: string;
   /** Optional layout/styling for the block's wrapper div */
   containerStyle?: ContainerStyle;
+  /** Tracks split paragraphs for pagination — both halves share the same splitId */
+  splitId?: string;
+  /** Which half of a split paragraph this is */
+  splitPart?: 'top' | 'bottom';
 }
 
 export interface ParagraphBlock extends BlockBase {

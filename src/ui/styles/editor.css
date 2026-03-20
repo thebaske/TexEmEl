@@ -14,31 +14,22 @@
   min-height: 100%;
 }
 
-/* BSP mode: container centers the page with padding */
+/* BSP mode: container scrolls vertically through pages */
 .bsp-editor-container {
   padding: 32px 16px;
-  overflow: auto;
+  overflow-y: auto;
   align-items: flex-start;
 }
 
-/* BSP Editor Content — a fixed-size document page.
-   The BSP tree fills this page. Content scrolls WITHIN cells. */
+/* BSP Editor Content — the pages wrapper (not the page itself).
+   Pages (.bsp-page) are rendered inside this by LayoutEngine. */
 .bsp-editor-content {
   width: 100%;
-  max-width: 816px;       /* ~8.5 inches at 96dpi (letter width) */
-  height: 1056px;         /* ~11 inches at 96dpi (letter height) */
-  flex-shrink: 0;         /* don't shrink — keep page size */
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 2px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
   outline: none;
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.7;
   color: var(--text);
-  position: relative;
-  overflow: hidden;
 }
 
 /* Editor surface (BlockEngine container) */

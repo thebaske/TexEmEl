@@ -80,6 +80,29 @@ export function splitCell(
 }
 
 /**
+ * Split a leaf cell into two with specified content for each half.
+ * Used for content-aware splitting (e.g., user splits at a row).
+ */
+export function splitCellWithContent(
+  root: LayoutNode,
+  cellId: string,
+  direction: SplitDirection,
+  ratio: number,
+  firstBlocks: Block[],
+  secondBlocks: Block[],
+): LayoutNode {
+  return mapNode(root, cellId, (leaf) => {
+    if (leaf.type !== 'leaf') return leaf;
+    return createSplit(
+      direction,
+      createLeaf(firstBlocks),
+      createLeaf(secondBlocks),
+      ratio,
+    );
+  });
+}
+
+/**
  * Merge two sibling cells (children of a split) back into one leaf.
  * Content from both children is concatenated (first, then second).
  */

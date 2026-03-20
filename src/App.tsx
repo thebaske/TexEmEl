@@ -1,8 +1,8 @@
 import { useState, useCallback } from 'react';
 import type { DocumentTree } from './core/model/DocumentTree';
 import { createEmptyDocument } from './core/model/DocumentTree';
-import type { BlockEngine } from './core/engine/BlockEngine';
-import { Editor } from './ui/components/Editor';
+import type { LayoutEngine } from './core/layout/LayoutEngine';
+import { BspEditor } from './ui/components/BspEditor';
 import { Toolbar } from './ui/components/Toolbar';
 import { MenuBar } from './ui/components/MenuBar';
 import { useFileOpen } from './ui/hooks/useFileOpen';
@@ -17,7 +17,7 @@ function App() {
   const [document, setDocument] = useState<DocumentTree>(createEmptyDocument());
   const [fileName, setFileName] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
-  const [engine, setEngine] = useState<BlockEngine | null>(null);
+  const [engine, setEngine] = useState<LayoutEngine | null>(null);
   const [toolbarVersion, setToolbarVersion] = useState(0);
 
   const { openFile, openFilePath } = useFileOpen();
@@ -81,7 +81,7 @@ function App() {
     window.print();
   }, []);
 
-  const handleEditorReady = useCallback((eng: BlockEngine) => {
+  const handleEditorReady = useCallback((eng: LayoutEngine) => {
     setEngine(eng);
     eng.onToolbarUpdate(() => {
       setToolbarVersion(v => v + 1);
@@ -111,10 +111,10 @@ function App() {
           onClearRecent={clearRecentFiles}
         />
         <span className="toolbar-divider" />
-        <Toolbar engine={engine} version={toolbarVersion} />
+        <Toolbar engine={engine as any} version={toolbarVersion} />
       </div>
       <div className="app-editor">
-        <Editor
+        <BspEditor
           document={document}
           onDocumentChange={handleDocumentChange}
           onEditorReady={handleEditorReady}

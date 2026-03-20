@@ -14,6 +14,24 @@
   min-height: 100%;
 }
 
+/* BSP Editor Content — full-width layout surface */
+.bsp-editor-content {
+  width: 100%;
+  max-width: 900px;
+  min-height: calc(100vh - 160px);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  outline: none;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+
 /* Editor surface (BlockEngine container) */
 .editor-content {
   background: var(--bg);

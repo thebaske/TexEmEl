@@ -9,7 +9,7 @@
 // state. The cell owns its blocks, period.
 // ============================================================================
 
-import type { Block } from '../model/DocumentTree';
+import type { Block, InlineContent } from '../model/DocumentTree';
 import type { ITextKernel } from '../engine/types';
 import type { BlockNode } from '../engine/BlockNode';
 import { BlockRenderer } from '../engine/BlockRenderer';
@@ -207,6 +207,148 @@ export class CellInstance {
   }
 
   // =====================
+  //  STREAM SLICE — Content Stream Model
+  // =====================
+
+  /** The stream range this cell currently displays */
+  private sliceStart = 0;
+  private sliceEnd = 0;
+
+  /** Get the current stream range */
+  getStreamRange(): { start: number; end: number } {
+    return { start: this.sliceStart, end: this.sliceEnd };
+  }
+
+  /**
+   * Set the blocks this cell should display (from the ContentStream).
+   *
+   * Reconciles against current blocks by ID:
+   *   - Same ID → keep existing BlockNode (ProseMirror preserved)
+   *   - New ID → create new BlockNode
+   *   - Missing ID → destroy BlockNode
+   *
+   * This is the CORE of the Content Stream Model. Cells don't own blocks —
+   * they receive slices to display.
+   */
+  setSlice(blocks: Block[], startIndex: number, endIndex: number): void {
+    this.sliceStart = startIndex;
+    this.sliceEnd = endIndex;
+
+    // Build map of current blocks by ID for O(1) lookup
+    const currentMap = new Map<string, BlockNode>();
+    for (const bn of this.blocks) {
+      currentMap.set(bn.id, bn);
+    }
+
+    const newBlockIds = new Set(blocks.map(b => b.id).filter(Boolean) as string[]);
+
+    // Destroy blocks no longer in this cell's slice
+    for (const [id, bn] of currentMap) {
+      if (!newBlockIds.has(id)) {
+        this.config.registry.unregister(bn.id);
+        bn.destroy(); // removes DOM + kernel
+      }
+    }
+
+    // Build new block array, reusing existing BlockNodes where possible
+    const newBlocks: BlockNode[] = [];
+    for (const block of blocks) {
+      const existing = block.id ? currentMap.get(block.id) : undefined;
+      if (existing) {
+        // Reuse existing BlockNode — ProseMirror editor preserved!
+        // Don't update content from stream — PM editor IS the authority
+        // for blocks currently being displayed. Stream was already updated
+        // by the PM editor's onUpdate callback.
+        newBlocks.push(existing);
+      } else {
+        // Create new BlockNode from stream data
+        const node = this.createBlockNode(block);
+        this.config.registry.register(node);
+        newBlocks.push(node);
+      }
+    }
+
+    // Reorder DOM to match new slice order.
+    // appendChild on already-attached children MOVES them (no duplication).
+    this.blocks = newBlocks;
+    for (const bn of newBlocks) {
+      this.contentElement.appendChild(bn.element);
+    }
+
+    this.updateEmptyState();
+  }
+
+  /**
+   * Clear all blocks from this cell (used before setSlice on fresh layout).
+   */
+  clearBlocks(): void {
+    for (const bn of this.blocks) {
+      this.config.registry.unregister(bn.id);
+      bn.destroy();
+    }
+    this.blocks = [];
+    this.updateEmptyState();
+  }
+
+  // =====================
+  //  NORMALIZATION (legacy — used by old overflow system)
+  // =====================
+
+  /**
+   * Normalize multi-paragraph ProseMirror editors into individual blocks.
+   *
+   * When content is pasted, ProseMirror creates multiple <p> elements inside
+   * a single editor. The serialized Block has { type: 'break' } separating
+   * paragraphs. This method splits such blocks into individual BlockNodes,
+   * enabling block-level overflow detection.
+   *
+   * Returns true if any blocks were split.
+   */
+  normalizeBlocks(): boolean {
+    let changed = false;
+    const newBlocks: BlockNode[] = [];
+
+    for (const bn of this.blocks) {
+      const data = bn.getData();
+      const split = splitBlockByBreaks(data);
+
+      if (split.length > 1) {
+        changed = true;
+
+        // Get reference element before destroying (to insert at correct position)
+        const refElement = bn.element.nextSibling;
+
+        // Destroy the original multi-paragraph block
+        this.config.registry.unregister(bn.id);
+        bn.destroy();
+
+        // Create individual blocks at the correct DOM position
+        for (const blockData of split) {
+          const node = this.createBlockNode(blockData);
+          this.config.registry.register(node);
+
+          if (refElement) {
+            this.contentElement.insertBefore(node.element, refElement);
+          } else {
+            this.contentElement.appendChild(node.element);
+          }
+
+          newBlocks.push(node);
+        }
+      } else {
+        newBlocks.push(bn);
+      }
+    }
+
+    if (changed) {
+      this.blocks = newBlocks;
+      this.updateEmptyState();
+    }
+
+    return changed;
+  }
+
+  // =====================
   //  FOCUS
   // =====================
 
@@ -315,4 +457,54 @@ export class CellInstance {
   private updateEmptyState(): void {
     this.contentElement.classList.toggle('bsp-cell-empty', this.blocks.length === 0);
   }
+}
+
+// ============================================================================
+// Utility: Split a Block by its break elements into individual blocks
+// ============================================================================
+
+/**
+ * Split a paragraph/heading Block that contains { type: 'break' } separators
+ * into multiple individual Blocks (one per paragraph).
+ *
+ * ProseMirror packs multiple <p> elements into one Block during serialization,
+ * using break inlines as separators. This undoes that packing.
+ *
+ * Returns [block] unchanged if no breaks found.
+ */
+function splitBlockByBreaks(block: Block): Block[] {
+  if (block.type !== 'paragraph' && block.type !== 'heading') return [block];
+  if (!block.content || block.content.length === 0) return [block];
+
+  // Check if there are any breaks
+  const hasBreaks = block.content.some(item => item.type === 'break');
+  if (!hasBreaks) return [block];
+
+  // Split content on break elements
+  const segments: InlineContent[][] = [[]];
+  for (const item of block.content) {
+    if (item.type === 'break') {
+      segments.push([]);
+    } else {
+      segments[segments.length - 1].push(item);
+    }
+  }
+
+  if (segments.length <= 1) return [block];
+
+  // Create a Block for each segment
+  return segments.map((content, i) => {
+    if (i === 0) {
+      // First segment keeps original block type, ID, and alignment
+      // Clear pmDocJson since we're splitting the PM document
+      return { ...block, content, pmDocJson: undefined };
+    }
+    // Subsequent segments become paragraphs
+    return {
+      type: 'paragraph' as const,
+      content,
+      alignment: (block as any).alignment,
+      id: generateBlockId(),
+    };
+  });
 }

@@ -157,16 +157,13 @@ export class OverflowWatcher {
       this.overflowState.set(cellId, true);
       this.config.onOverflow(cellId);
     } else if (!isOverflowing && wasOverflowing) {
-      // Transitioned to underflow (had overflow, now has room)
+      // Transitioned FROM overflow to having room — only valid underflow case.
+      // This happens when a cell's container grows (resize) and content that
+      // previously overflowed now fits. Safe to pull back overflow content.
       this.overflowState.set(cellId, false);
       this.config.onUnderflow(cellId);
-    } else if (!isOverflowing && !wasOverflowing) {
-      // Never overflowed, but check if we have room to pull content back
-      // Only emit underflow if there's meaningful spare room
-      const spareRoom = clientHeight - scrollHeight;
-      if (spareRoom > this.threshold) {
-        this.config.onUnderflow(cellId);
-      }
     }
+    // NOTE: We do NOT fire underflow for cells that never overflowed.
+    // That would steal user-placed content from neighboring cells.
   }
 }

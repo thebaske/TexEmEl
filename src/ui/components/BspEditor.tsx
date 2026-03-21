@@ -25,6 +25,7 @@ export function BspEditor({ document, onDocumentChange, onEditorReady }: BspEdit
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<LayoutDirector | null>(null);
   const readyFiredRef = useRef(false);
+  const mountedRef = useRef(false);
   const onChangeRef = useRef(onDocumentChange);
   onChangeRef.current = onDocumentChange;
 
@@ -54,16 +55,23 @@ export function BspEditor({ document, onDocumentChange, onEditorReady }: BspEdit
       onEditorReady?.(engine);
     }
 
+    // Mark mounted after first frame so update effect skips initial render
+    requestAnimationFrame(() => {
+      mountedRef.current = true;
+    });
+
     return () => {
       engine.destroy();
       engineRef.current = null;
+      mountedRef.current = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Mount once only
 
   // Update engine when document changes externally (file open)
+  // Skip initial render — mount() already loaded the document
   useEffect(() => {
-    if (!engineRef.current) return;
+    if (!engineRef.current || !mountedRef.current) return;
     engineRef.current.update(document);
   }, [document.metadata.sourceFileName, document.metadata.createdAt]);
 

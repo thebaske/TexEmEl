@@ -162,6 +162,36 @@ export class CellInstance {
     return data;
   }
 
+  /**
+   * Replace a block at a specific index with new data.
+   * Destroys the old block and creates a new one in its place.
+   * Used for line-level overflow splitting (replacing a paragraph with its first half).
+   */
+  replaceBlock(index: number, newBlockData: Block): BlockNode | null {
+    if (index < 0 || index >= this.blocks.length) return null;
+
+    const old = this.blocks[index];
+    const refElement = old.element.nextSibling;
+
+    // Destroy old
+    this.config.registry.unregister(old.id);
+    old.destroy();
+
+    // Create new
+    const node = this.createBlockNode(newBlockData);
+    this.config.registry.register(node);
+    this.blocks[index] = node;
+
+    // Insert at same position
+    if (refElement) {
+      this.contentElement.insertBefore(node.element, refElement);
+    } else {
+      this.contentElement.appendChild(node.element);
+    }
+
+    return node;
+  }
+
   /** Remove a specific block by ID */
   removeBlock(blockId: string): Block | null {
     const index = this.blocks.findIndex(bn => bn.id === blockId);

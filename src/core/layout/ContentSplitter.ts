@@ -10,8 +10,7 @@
 // ============================================================================
 
 import type { Block, InlineContent, TextInline, ParagraphBlock, HeadingBlock } from '../model/DocumentTree';
-import type { CellHandle } from './CellRenderer';
-import type { OverflowInfo, LineBreakInfo } from './OverflowDetector';
+import type { OverflowInfo, LineBreakInfo, MeasurableCell } from './OverflowDetector';
 import { generateBlockId } from '../engine/BlockId';
 
 // --- Types ---
@@ -183,15 +182,15 @@ export class ContentSplitter {
    * Split content at a Y position within a cell (for user-initiated splits).
    * Measures block positions to determine which blocks are above/below.
    */
-  splitAtPosition(handle: CellHandle, yPosition: number): SplitResult {
-    const contentRect = handle.contentElement.getBoundingClientRect();
+  splitAtPosition(cell: MeasurableCell, yPosition: number): SplitResult {
+    const contentRect = cell.contentElement.getBoundingClientRect();
     const relativeY = yPosition - contentRect.top;
 
-    const blocks: Block[] = handle.blockNodes.map(bn => bn.getData());
+    const blocks: Block[] = cell.blockNodes.map(bn => bn.getData());
     let splitIndex = blocks.length; // default: all above
 
-    for (let i = 0; i < handle.blockNodes.length; i++) {
-      const rect = handle.blockNodes[i].element.getBoundingClientRect();
+    for (let i = 0; i < cell.blockNodes.length; i++) {
+      const rect = cell.blockNodes[i].element.getBoundingClientRect();
       const blockMiddle = (rect.top + rect.bottom) / 2 - contentRect.top;
 
       if (blockMiddle > relativeY) {

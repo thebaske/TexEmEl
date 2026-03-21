@@ -88,10 +88,35 @@
 
 .bsp-cell-content {
   flex: 1;
-  padding: 12px 16px;
+  padding: 12px 16px 24px;
   outline: none;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
+}
+
+/* Styled scrollbars — thin, unobtrusive */
+.bsp-cell-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.bsp-cell-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bsp-cell-content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.bsp-cell-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Firefox scrollbar styling */
+.bsp-cell-content {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
 /* Empty cell placeholder */

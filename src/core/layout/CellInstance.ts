@@ -9,7 +9,7 @@
 // state. The cell owns its blocks, period.
 // ============================================================================
 
-import type { Block } from '../model/DocumentTree';
+import type { Block, InlineContent } from '../model/DocumentTree';
 import type { ITextKernel } from '../engine/types';
 import type { BlockNode } from '../engine/BlockNode';
 import { BlockRenderer } from '../engine/BlockRenderer';
@@ -207,6 +207,55 @@ export class CellInstance {
   }
 
   // =====================
+  //  NORMALIZATION
+  // =====================
+
+  /**
+   * Split multi-paragraph ProseMirror editors into individual blocks.
+   * Paste creates ONE PM editor with multiple <p> elements.
+   * This splits them into separate BlockNodes so page overflow
+   * can measure and split at block boundaries.
+   * Returns true if any blocks were split.
+   */
+  normalizeBlocks(): boolean {
+    let changed = false;
+    const newBlocks: BlockNode[] = [];
+
+    for (const bn of this.blocks) {
+      const data = bn.getData();
+      const split = splitBlockByBreaks(data);
+
+      if (split.length > 1) {
+        changed = true;
+        const refElement = bn.element.nextSibling;
+
+        this.config.registry.unregister(bn.id);
+        bn.destroy();
+
+        for (const blockData of split) {
+          const node = this.createBlockNode(blockData);
+          this.config.registry.register(node);
+
+          if (refElement) {
+            this.contentElement.insertBefore(node.element, refElement);
+          } else {
+            this.contentElement.appendChild(node.element);
+          }
+          newBlocks.push(node);
+        }
+      } else {
+        newBlocks.push(bn);
+      }
+    }
+
+    if (changed) {
+      this.blocks = newBlocks;
+      this.updateEmptyState();
+    }
+    return changed;
+  }
+
+  // =====================
   //  FOCUS
   // =====================
 
@@ -315,4 +364,39 @@ export class CellInstance {
   private updateEmptyState(): void {
     this.contentElement.classList.toggle('bsp-cell-empty', this.blocks.length === 0);
   }
+}
+
+// ============================================================================
+// Utility: Split a Block by its break elements into individual blocks
+// ============================================================================
+
+function splitBlockByBreaks(block: Block): Block[] {
+  if (block.type !== 'paragraph' && block.type !== 'heading') return [block];
+  if (!block.content || block.content.length === 0) return [block];
+
+  const hasBreaks = block.content.some((item: InlineContent) => item.type === 'break');
+  if (!hasBreaks) return [block];
+
+  const segments: InlineContent[][] = [[]];
+  for (const item of block.content) {
+    if (item.type === 'break') {
+      segments.push([]);
+    } else {
+      segments[segments.length - 1].push(item);
+    }
+  }
+
+  if (segments.length <= 1) return [block];
+
+  return segments.map((content, i) => {
+    if (i === 0) {
+      return { ...block, content, pmDocJson: undefined };
+    }
+    return {
+      type: 'paragraph' as const,
+      content,
+      alignment: (block as any).alignment,
+      id: generateBlockId(),
+    };
+  });
 }

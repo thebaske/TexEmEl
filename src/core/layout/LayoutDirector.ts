@@ -1,15 +1,15 @@
 // ============================================================================
-// LayoutDirector — Thin orchestrator for BSP layout (V3 Architecture)
+// LayoutDirector — BSP Layout Orchestrator (No-Flow Architecture)
 //
-// Replaces LayoutEngine. Delegates to:
+// Each cell owns its content independently. No overflow, no flow, no stream.
+// Content stays where the user puts it. Cells scroll when content exceeds
+// their bounds. The user is the layout engine.
+//
+// Delegates to:
 //   - CellPool: persistent cell instances
 //   - LayoutReconciler: diff-based DOM updates
 //   - SplitResizeManager: drag resize handles
 //   - EdgeSplitManager: edge-pull-to-split
-//
-// Key difference from LayoutEngine: NO nuclear renders. Cells survive all
-// layout operations. ProseMirror instances are never destroyed during
-// split/merge/resize.
 // ============================================================================
 
 import type { Block, DocumentTree, TextMark } from '../model/DocumentTree';
@@ -20,8 +20,6 @@ import { CellPool } from './CellPool';
 import { LayoutReconciler } from './LayoutReconciler';
 import { SplitResizeManager } from './SplitResizeManager';
 import { EdgeSplitManager } from './EdgeSplitManager';
-import { FlowGraph } from './FlowGraph';
-import { OverflowWatcher } from './OverflowWatcher';
 import { OverflowDetector } from './OverflowDetector';
 import {
   type LayoutNode,
@@ -38,7 +36,6 @@ import {
   removeBlockFromCell,
   updateLeafBlocks,
 } from './LayoutTree';
-import { ContentSplitter } from './ContentSplitter';
 import {
   type Page,
   createPage,
@@ -76,10 +73,8 @@ export class LayoutDirector {
   private reconciler: LayoutReconciler | null = null;
   private resizeManager: SplitResizeManager | null = null;
   private edgeSplitManager: EdgeSplitManager | null = null;
-  private flowGraph: FlowGraph = new FlowGraph();
-  private overflowWatcher: OverflowWatcher | null = null;
+
   private overflowDetector = new OverflowDetector();
-  private contentSplitter = new ContentSplitter();
 
   // Kernel factory — injected by consumer
   private kernelFactory: ((node: BlockNode, el: HTMLElement, block: Block) => ITextKernel) | null = null;
@@ -90,9 +85,6 @@ export class LayoutDirector {
 
   // Debounce
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
-  private overflowCheckTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Guard: true while resolving overflow (prevents content-change → overflow loop) */
-  private resolvingOverflow = false;
 
   constructor(config?: Partial<LayoutDirectorConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -131,9 +123,9 @@ export class LayoutDirector {
       onContentChange: (cellId: string) => {
         this.debouncedSync();
         this.emitToolbarUpdate();
-        // Schedule overflow check — content changed, container size didn't,
-        // so ResizeObserver won't fire. We must check explicitly.
-        this.scheduleOverflowCheck(cellId);
+        // Check if this is the last cell on the last page and it overflows
+        // → one-shot page creation for paste/large content
+        this.checkLastCellOverflow(cellId);
       },
       onSelectionChange: (_cellId: string) => {
         this.emitToolbarUpdate();
@@ -148,12 +140,14 @@ export class LayoutDirector {
     // Initial render
     this.reconciler.reconcilePages(container, this.pages);
 
-    // Build flow graph and start overflow watching
-    this.rebuildFlowAndWatch();
-
-    // Run initial overflow pass after browser layout (handles pre-loaded content)
+    // After initial render, check if content exceeds the first page
+    // and distribute across pages if needed (for file open / large documents)
     requestAnimationFrame(() => {
-      this.runFullOverflowPass();
+      const leaves = getAllLeaves(this.pages[0].layout);
+      const lastLeafId = leaves[leaves.length - 1]?.id;
+      if (lastLeafId) {
+        this.distributeOverflowToPages(lastLeafId);
+      }
     });
 
     // Set up resize manager
@@ -168,10 +162,7 @@ export class LayoutDirector {
             break;
           }
         }
-        // Resize may cause overflow/underflow — run synchronous pass
-        requestAnimationFrame(() => {
-          this.runFullOverflowPass();
-        });
+        this.syncToReact();
       },
     });
 
@@ -191,8 +182,6 @@ export class LayoutDirector {
     if (!this.container || !this.cellPool || !this.reconciler) return;
 
     // Destroy old subsystems first (removes orphan DOM elements)
-    this.overflowWatcher?.destroy();
-    this.overflowWatcher = null;
     this.reconciler.destroy();
     this.cellPool.destroy();
 
@@ -202,9 +191,9 @@ export class LayoutDirector {
       onContentChange: (cellId: string) => {
         this.debouncedSync();
         this.emitToolbarUpdate();
-        // Schedule overflow check — content changed, container size didn't,
-        // so ResizeObserver won't fire. We must check explicitly.
-        this.scheduleOverflowCheck(cellId);
+        // Check if this is the last cell on the last page and it overflows
+        // → one-shot page creation for paste/large content
+        this.checkLastCellOverflow(cellId);
       },
       onSelectionChange: (_cellId: string) => {
         this.emitToolbarUpdate();
@@ -226,19 +215,23 @@ export class LayoutDirector {
 
     this.reconciler.reconcilePages(this.container, this.pages);
 
-    // Rebuild flow graph and start overflow watching
-    this.rebuildFlowAndWatch();
+    // Distribute across pages if content exceeds first page
+    requestAnimationFrame(() => {
+      const leaves = getAllLeaves(this.pages[0].layout);
+      const lastLeafId = leaves[leaves.length - 1]?.id;
+      if (lastLeafId) {
+        this.distributeOverflowToPages(lastLeafId);
+      }
+    });
   }
 
   destroy(): void {
     if (this.syncTimer) clearTimeout(this.syncTimer);
     if (this.overflowCheckTimer) clearTimeout(this.overflowCheckTimer);
-    this.overflowWatcher?.destroy();
     this.resizeManager?.destroy();
     this.edgeSplitManager?.destroy();
     this.reconciler?.destroy();
     this.cellPool?.destroy();
-    this.flowGraph.clear();
     this.onChangeCallbacks = [];
     this.onToolbarUpdateCallbacks = [];
     this.container = null;
@@ -271,24 +264,14 @@ export class LayoutDirector {
     const page = getPageForCell(this.pages, targetId);
     if (!page) return;
 
-    // Update tree — original cell keeps its ID (no content sync needed!)
     const { tree: newLayout } = splitCell(page.layout, targetId, direction, ratio);
     this.updatePageLayout(page.id, newLayout);
 
-    // Reconcile — cellPool.acquire(targetId) returns EXISTING cell, reparents it
     this.reconciler.reconcilePages(this.container!, this.pages);
-
-    // Rebuild flow graph and watch new cells
-    this.rebuildFlowAndWatch();
     this.syncToReact();
-
-    // Split may redistribute space — check overflow after layout
-    requestAnimationFrame(() => {
-      this.runFullOverflowPass();
-    });
   }
 
-  /** Merge a cell with its sibling (reading order: first absorbs second) */
+  /** Merge a cell with its sibling. Content concatenated in reading order. */
   merge(cellId?: string): void {
     const targetId = cellId ?? this.activeCellId;
     if (!targetId || !this.cellPool || !this.reconciler) return;
@@ -299,41 +282,39 @@ export class LayoutDirector {
     const parent = findParent(page.layout, targetId);
     if (!parent) return;
 
-    // Determine reading order: first child absorbs second child's content
-    const isFirst = parent.first.id === targetId ||
-      (parent.first.type === 'split' && findNode(parent.first, targetId));
+    // Collect ALL content from both subtrees in reading order (Z-pattern)
+    const firstLeaves = getAllLeaves(parent.first);
+    const secondLeaves = getAllLeaves(parent.second);
+    const allContent: Block[] = [];
 
-    const survivorId = isFirst ? this.getFirstLeafId(parent.first) : this.getFirstLeafId(parent.second);
-    const victimId = isFirst ? this.getFirstLeafId(parent.second) : this.getFirstLeafId(parent.first);
-
-    if (!survivorId || !victimId) return;
-
-    // Live content transfer: survivor absorbs victim's blocks
-    const survivor = this.cellPool.get(survivorId);
-    const victim = this.cellPool.get(victimId);
-    if (survivor && victim) {
-      const victimContent = victim.drainAll();
-      if (victimContent.length > 0) {
-        survivor.appendBlocks(victimContent);
+    // Reading order: first subtree leaves, then second subtree leaves
+    for (const leaf of [...firstLeaves, ...secondLeaves]) {
+      const cell = this.cellPool.get(leaf.id);
+      if (cell) {
+        allContent.push(...cell.drainAll());
       }
     }
 
-    // Update tree structure (collapse the split)
-    this.updatePageLayout(page.id, mergeCells(page.layout, parent.id));
-    this.activeCellId = survivorId;
-    this.focusedBlockId = null;
+    // The survivor is always the first leaf (reading order preserved)
+    const survivorId = firstLeaves[0]?.id;
+    if (!survivorId) return;
 
-    // Reconcile — orphaned cells get cleaned up
+    // Update tree structure (collapse the split into a single leaf)
+    this.updatePageLayout(page.id, mergeCells(page.layout, parent.id));
+
+    // Reconcile first — this creates the merged leaf cell
     this.reconciler.reconcilePages(this.container!, this.pages);
 
-    // Rebuild flow graph
-    this.rebuildFlowAndWatch();
-    this.syncToReact();
+    // Now find the merged cell and populate it with all collected content
+    const mergedLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
+    const mergedCell = this.cellPool.get(mergedLeaves[0]?.id ?? '');
+    if (mergedCell && allContent.length > 0) {
+      mergedCell.appendBlocks(allContent);
+    }
 
-    // Merge may cause overflow in survivor — check after layout
-    requestAnimationFrame(() => {
-      this.runFullOverflowPass();
-    });
+    this.activeCellId = mergedCell?.id ?? null;
+    this.focusedBlockId = null;
+    this.syncToReact();
   }
 
   getLayout(): LayoutNode {
@@ -678,7 +659,6 @@ export class LayoutDirector {
     if (!cell) return;
 
     if (cell.isEmpty()) {
-      // Local operation: add a paragraph block directly to the cell
       const newBlock = cell.ensureEditable();
       this.focusedBlockId = newBlock.id;
 
@@ -724,13 +704,129 @@ export class LayoutDirector {
     );
   }
 
-  private getFirstLeafId(node: LayoutNode): string | null {
-    if (node.type === 'leaf') return node.id;
-    return this.getFirstLeafId(node.first);
-  }
 
   private emitToolbarUpdate(): void {
     for (const cb of this.onToolbarUpdateCallbacks) cb();
+  }
+
+  // =====================
+  //  PASTE-TIME PAGE CREATION
+  // =====================
+
+  private overflowCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Check if a cell is the last cell on the last page and overflows.
+   * If so, distribute overflow content across new pages.
+   * Debounced to let ProseMirror finish processing paste.
+   */
+  private checkLastCellOverflow(cellId: string): void {
+    if (this.overflowCheckTimer) clearTimeout(this.overflowCheckTimer);
+    this.overflowCheckTimer = setTimeout(() => {
+      this.distributeOverflowToPages(cellId);
+    }, 100);
+  }
+
+  /**
+   * One-shot overflow distribution: if the last cell on the last page
+   * overflows, trim excess blocks and create new pages to hold them.
+   * After this, content is fully manual — no ongoing monitoring.
+   */
+  private distributeOverflowToPages(cellId: string): void {
+    if (!this.cellPool || !this.reconciler || !this.container) return;
+
+    // Only trigger for the last cell on the last page
+    const lastPage = this.pages[this.pages.length - 1];
+    if (!lastPage) return;
+
+    const lastPageLeaves = getAllLeaves(lastPage.layout);
+    const lastCellId = lastPageLeaves[lastPageLeaves.length - 1]?.id;
+    console.log(`[PageOverflow] check: cellId=${cellId.slice(0,8)}, lastCellId=${lastCellId?.slice(0,8)}, match=${cellId === lastCellId}`);
+    if (cellId !== lastCellId) return;
+
+    const cell = this.cellPool.get(cellId);
+    if (!cell) return;
+
+    // Reset scroll before measuring — after paste, ProseMirror scrolls to cursor
+    // which shifts getBoundingClientRect() positions and breaks findBreakPoint.
+    cell.contentElement.scrollTop = 0;
+
+    // Normalize: split multi-paragraph ProseMirror editors into individual blocks.
+    // Paste creates ONE PM editor with N paragraphs — we need N separate blocks
+    // so findBreakPoint can measure which ones fit on the page.
+    const didNormalize = cell.normalizeBlocks();
+    console.log(`[PageOverflow] cell ${cellId.slice(0,8)}: ${cell.blockCount()} blocks, normalized=${didNormalize}`);
+
+    const measurable = {
+      cellId: cell.id,
+      contentElement: cell.contentElement,
+      blockNodes: cell.getBlockNodes(),
+    };
+
+    const sh = cell.contentElement.scrollHeight;
+    const ch = cell.contentElement.clientHeight;
+    console.log(`[PageOverflow] scrollHeight=${sh}, clientHeight=${ch}, overflow=${sh > ch + 1}`);
+
+    if (!this.overflowDetector.hasOverflow(measurable)) return;
+
+    // Find what fits
+    const info = this.overflowDetector.findBreakPoint(measurable);
+    console.log(`[PageOverflow] findBreakPoint: hasOverflow=${info.hasOverflow}, lastFitting=${info.lastFittingBlockIndex}, totalBlocks=${cell.blockCount()}`);
+    if (!info.hasOverflow) return;
+
+    // Subtract 1 block from the fit count as margin buffer.
+    // This prevents sub-pixel margin overflow that causes tiny scrollbars.
+    const rawFit = info.lastFittingBlockIndex + 1;
+    const fitCount = Math.max(1, rawFit > 1 ? rawFit - 1 : rawFit);
+    if (fitCount >= cell.blockCount()) return; // everything fits
+
+    // Trim overflow blocks from this cell
+    const overflowBlocks = cell.trimFrom(fitCount);
+    console.log(`[PageOverflow] trimmed: kept=${fitCount}, overflow=${overflowBlocks.length}`);
+    if (overflowBlocks.length === 0) return;
+
+    // Create new pages with overflow content
+    // Each page gets a full-page cell. Fill pages until all content is placed.
+    let remaining = overflowBlocks;
+
+    while (remaining.length > 0) {
+      console.log(`[PageOverflow] creating page with ${remaining.length} blocks`);
+      // Create a new page
+      const newPage = createPage(remaining);
+      this.pages = addPageAfter(this.pages, this.pages[this.pages.length - 1].id, newPage);
+
+      // Reconcile to render the new page
+      this.reconciler.reconcilePages(this.container, this.pages);
+
+      // Check if the new page's cell overflows too
+      const newPageLeaves = getAllLeaves(newPage.layout);
+      const newCell = this.cellPool.get(newPageLeaves[0]?.id ?? '');
+      if (!newCell) break;
+
+      // Reset scroll before measuring new page too
+      newCell.contentElement.scrollTop = 0;
+
+      const newMeasurable = {
+        cellId: newCell.id,
+        contentElement: newCell.contentElement,
+        blockNodes: newCell.getBlockNodes(),
+      };
+
+      if (!this.overflowDetector.hasOverflow(newMeasurable)) {
+        break; // everything fits on this page
+      }
+
+      // Still overflows — trim and continue to next page
+      const newInfo = this.overflowDetector.findBreakPoint(newMeasurable);
+      const newRawFit = newInfo.lastFittingBlockIndex + 1;
+      const newFitCount = Math.max(1, newRawFit > 1 ? newRawFit - 1 : newRawFit);
+
+      if (newFitCount >= newCell.blockCount()) break;
+
+      remaining = newCell.trimFrom(newFitCount);
+    }
+
+    this.syncToReact();
   }
 
   private debouncedSync(): void {
@@ -741,277 +837,7 @@ export class LayoutDirector {
   }
 
   /**
-   * Schedule an overflow check for a specific cell after content changes.
-   * Debounced to 200ms to batch rapid keystrokes.
-   * Guarded against re-entry (overflow resolution itself modifies content).
-   */
-  private scheduleOverflowCheck(cellId: string): void {
-    if (this.resolvingOverflow) return; // Don't re-enter during resolution
-
-    if (this.overflowCheckTimer) clearTimeout(this.overflowCheckTimer);
-    this.overflowCheckTimer = setTimeout(() => {
-      this.checkAndResolveOverflow(cellId);
-    }, 200);
-  }
-
-  /**
-   * Check a single cell for overflow and resolve if needed.
-   * Also checks for underflow in the cell's flow source.
-   */
-  private checkAndResolveOverflow(cellId: string): void {
-    if (this.resolvingOverflow || !this.cellPool) return;
-
-    const cell = this.cellPool.get(cellId);
-    if (!cell) return;
-
-    const measurable = {
-      cellId: cell.id,
-      contentElement: cell.contentElement,
-      blockNodes: cell.getBlockNodes(),
-    };
-
-    if (this.overflowDetector.hasOverflow(measurable)) {
-      this.handleOverflow(cellId);
-    } else {
-      // No overflow — maybe underflow? (cell has room, pull content back)
-      const sourceId = this.flowGraph.getSource(cellId);
-      if (sourceId) {
-        this.handleUnderflow(sourceId);
-      }
-      // Also check if THIS cell can pull from its target
-      this.handleUnderflow(cellId);
-    }
-  }
-
-  // =====================
-  //  FLOW & OVERFLOW
-  // =====================
-
-  /**
-   * Rebuild the flow graph from current BSP tree structure
-   * and (re)start overflow watching on all cells.
-   */
-  private rebuildFlowAndWatch(): void {
-    if (!this.cellPool) return;
-
-    // Rebuild flow graph from current tree structure
-    this.flowGraph = FlowGraph.fromPages(this.pages);
-
-    // Tear down and recreate overflow watcher
-    this.overflowWatcher?.destroy();
-    this.overflowWatcher = new OverflowWatcher({
-      onOverflow: (cellId) => this.handleOverflow(cellId),
-      onUnderflow: (cellId) => this.handleUnderflow(cellId),
-      threshold: 2,
-    });
-
-    // Watch all live cells
-    for (const page of this.pages) {
-      const leaves = getAllLeaves(page.layout);
-      for (const leaf of leaves) {
-        const cell = this.cellPool.get(leaf.id);
-        if (cell) {
-          this.overflowWatcher.watch(cell);
-        }
-      }
-    }
-  }
-
-  /**
-   * Handle overflow: move excess blocks from this cell to its flow target.
-   * Supports both block-level and mid-paragraph (line-level) splits.
-   * Cascades synchronously through the flow chain — no async reliance.
-   */
-  private handleOverflow(cellId: string): void {
-    if (!this.cellPool || this.resolvingOverflow) return;
-
-    // Guard: prevent re-entrant overflow during resolution
-    this.resolvingOverflow = true;
-    this.overflowWatcher?.beginResolving();
-
-    try {
-      this.resolveOverflowChain(cellId);
-      this.syncToReact();
-    } finally {
-      this.overflowWatcher?.endResolving();
-      this.resolvingOverflow = false;
-    }
-  }
-
-  /**
-   * Synchronous overflow cascade: process cell, then process target if it overflowed too.
-   * Max 50 iterations to prevent infinite loops.
-   */
-  private resolveOverflowChain(startCellId: string): void {
-    let currentCellId: string | null = startCellId;
-    let iterations = 0;
-    const MAX_ITERATIONS = 50;
-
-    while (currentCellId && iterations < MAX_ITERATIONS) {
-      iterations++;
-      const cell = this.cellPool!.get(currentCellId);
-      if (!cell) break;
-
-      const measurable = {
-        cellId: cell.id,
-        contentElement: cell.contentElement,
-        blockNodes: cell.getBlockNodes(),
-      };
-
-      // Force browser layout so measurements are accurate
-      // Reading scrollHeight/clientHeight triggers layout
-      const info = this.overflowDetector.findBreakPoint(measurable);
-
-      if (!info.hasOverflow) break;
-
-      // Use ContentSplitter to determine the split (handles line-level breaks)
-      const blocks = cell.getContent();
-      const splitResult = this.contentSplitter.splitOnOverflow(blocks, info);
-
-      if (splitResult.overflow.length === 0) break;
-
-      // Apply the split to the live cell
-      if (info.lineBreak && info.lineBreak.blockIndex < cell.blockCount()) {
-        // Line-level split: replace the spanning block with its first half,
-        // then trim everything after it
-        const spanIdx = info.lineBreak.blockIndex;
-        const fittingBlock = splitResult.fitting[splitResult.fitting.length - 1];
-        cell.replaceBlock(spanIdx, fittingBlock);
-        // Trim all blocks after the replaced one
-        cell.trimFrom(spanIdx + 1);
-      } else {
-        // Block-level split: trim from the first overflow block
-        const trimIndex = splitResult.fitting.length;
-        cell.trimFrom(trimIndex);
-      }
-
-      // Find the flow target
-      const targetId = this.flowGraph.getTarget(currentCellId);
-      if (!targetId) {
-        // No flow target — create a new page with overflow blocks
-        this.createOverflowPage(splitResult.overflow);
-        break; // createOverflowPage rebuilds flow graph, stop cascade
-      }
-
-      const targetCell = this.cellPool!.get(targetId);
-      if (!targetCell) break;
-
-      // Prepend overflow blocks to the target cell
-      targetCell.prependBlocks(splitResult.overflow);
-
-      // Continue cascade: check if the target now overflows
-      currentCellId = targetId;
-    }
-  }
-
-  /**
-   * Handle underflow: pull blocks back from flow target if this cell has room.
-   * Non-speculative: measures hypothetical height BEFORE modifying DOM.
-   */
-  private handleUnderflow(cellId: string): void {
-    if (!this.cellPool || this.resolvingOverflow) return;
-
-    const targetId = this.flowGraph.getTarget(cellId);
-    if (!targetId) return;
-
-    const cell = this.cellPool.get(cellId);
-    const targetCell = this.cellPool.get(targetId);
-    if (!cell || !targetCell || targetCell.isEmpty()) return;
-
-    // Guard against re-entrant underflow
-    this.resolvingOverflow = true;
-    this.overflowWatcher?.beginResolving();
-
-    try {
-      let pulled = false;
-
-      // Pull blocks one at a time from the target while they fit
-      while (!targetCell.isEmpty()) {
-        const targetBlocks = targetCell.getBlockNodes();
-        if (targetBlocks.length === 0) break;
-
-        const firstBlockData = targetBlocks[0].getData();
-
-        // Speculatively add to test fit
-        cell.appendBlocks([firstBlockData]);
-
-        const measurable = {
-          cellId: cell.id,
-          contentElement: cell.contentElement,
-          blockNodes: cell.getBlockNodes(),
-        };
-
-        if (this.overflowDetector.hasOverflow(measurable)) {
-          // Doesn't fit — remove the block we just added and stop
-          cell.trimFrom(cell.blockCount() - 1);
-          break;
-        }
-
-        // It fits! Remove from target (the block was already cloned into this cell)
-        targetCell.removeBlock(firstBlockData.id!);
-        pulled = true;
-      }
-
-      if (pulled) {
-        this.syncToReact();
-      }
-    } finally {
-      this.overflowWatcher?.endResolving();
-      this.resolvingOverflow = false;
-    }
-  }
-
-  /**
-   * Run a full synchronous overflow pass on ALL cells in reading order.
-   * Used after mount, paste, file open — any time content may have changed significantly.
-   */
-  private runFullOverflowPass(): void {
-    if (!this.cellPool || this.resolvingOverflow) return;
-
-    this.resolvingOverflow = true;
-    this.overflowWatcher?.beginResolving();
-    try {
-      for (const page of this.pages) {
-        const leaves = getAllLeaves(page.layout);
-        for (const leaf of leaves) {
-          const cell = this.cellPool.get(leaf.id);
-          if (!cell) continue;
-
-          const measurable = {
-            cellId: cell.id,
-            contentElement: cell.contentElement,
-            blockNodes: cell.getBlockNodes(),
-          };
-
-          if (this.overflowDetector.hasOverflow(measurable)) {
-            this.resolveOverflowChain(cell.id);
-          }
-        }
-      }
-      this.syncToReact();
-    } finally {
-      this.overflowWatcher?.endResolving();
-      this.resolvingOverflow = false;
-    }
-  }
-
-  /**
-   * Create a new page to hold overflow content.
-   */
-  private createOverflowPage(blocks: Block[]): void {
-    const newPage = createPage(blocks);
-    this.pages = [...this.pages, newPage];
-
-    // Reconcile to render the new page
-    this.reconciler?.reconcilePages(this.container!, this.pages);
-
-    // Rebuild flow graph to include new page
-    this.rebuildFlowAndWatch();
-  }
-
-  /**
    * Rebuild DocumentTree from all live cells and emit onChange.
-   * Reads directly from CellPool — no stale tree data, no sync race.
    */
   private syncToReact(): void {
     if (!this.cellPool) return;
@@ -1024,7 +850,6 @@ export class LayoutDirector {
         if (cell) {
           allBlocks.push(...cell.getContent());
         } else {
-          // Fallback to tree data for cells not yet in pool
           allBlocks.push(...leaf.blocks);
         }
       }

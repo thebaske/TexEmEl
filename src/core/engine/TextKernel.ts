@@ -17,7 +17,8 @@ import { history, undo, redo } from 'prosemirror-history';
 import { inputRules, wrappingInputRule, textblockTypeInputRule } from 'prosemirror-inputrules';
 
 import type { Block, InlineContent, TextMark, ParagraphBlock, HeadingBlock, CodeBlock } from '../model/DocumentTree';
-import type { ITextKernel } from './types';
+import type { ITextKernel, NavigationHandler } from './types';
+import { TextSelection } from 'prosemirror-state';
 
 // --- Schema ---
 
@@ -181,6 +182,7 @@ export class TextKernel implements ITextKernel {
   private updateCallbacks: (() => void)[] = [];
   private selectionUpdateCallbacks: (() => void)[] = [];
   private enterAtEndCallbacks: (() => void)[] = [];
+  private navHandler: NavigationHandler | null = null;
 
   constructor(container: HTMLElement, block: Block) {
     this.schema = pmSchema;
@@ -211,14 +213,70 @@ export class TextKernel implements ITextKernel {
           }
         }
 
-        // Selection/storedMarks changed (cursor moved, mark toggled) — toolbar needs update
         if (tr.selectionSet || tr.storedMarksSet || tr.docChanged) {
           for (const cb of this.selectionUpdateCallbacks) {
             cb();
           }
         }
       },
+      handleDOMEvents: {
+        keydown: (_view: EditorView, event: KeyboardEvent) => {
+          return this.handleNavigationKey(event);
+        },
+      },
     });
+  }
+
+  // --- Navigation Key Interception ---
+
+  /**
+   * Intercept ONLY arrow keys at boundaries for cross-block navigation.
+   * Returns true if we handled it (prevents PM from handling).
+   * All other keys (typing, Enter, Ctrl+A, etc.) pass through to PM.
+   */
+  private handleNavigationKey(event: KeyboardEvent): boolean {
+    if (!this.navHandler) return false;
+
+    const { key, shiftKey } = event;
+
+    // Only intercept plain arrow keys (no shift = no selection extension)
+    if (shiftKey) return false;
+
+    // Only intercept arrow keys
+    if (key !== 'ArrowDown' && key !== 'ArrowUp' &&
+        key !== 'ArrowRight' && key !== 'ArrowLeft') {
+      return false;
+    }
+
+    // ArrowDown at last line → move to next block
+    if (key === 'ArrowDown' && this.isCursorOnLastLine()) {
+      event.preventDefault();
+      this.navHandler.onBoundary('down');
+      return true;
+    }
+
+    // ArrowUp at first line → move to previous block
+    if (key === 'ArrowUp' && this.isCursorOnFirstLine()) {
+      event.preventDefault();
+      this.navHandler.onBoundary('up');
+      return true;
+    }
+
+    // ArrowRight at end → move to next block
+    if (key === 'ArrowRight' && this.isCursorAtEnd()) {
+      event.preventDefault();
+      this.navHandler.onBoundary('right');
+      return true;
+    }
+
+    // ArrowLeft at start → move to previous block
+    if (key === 'ArrowLeft' && this.isCursorAtStart()) {
+      event.preventDefault();
+      this.navHandler.onBoundary('left');
+      return true;
+    }
+
+    return false;
   }
 
   // --- ITextKernel Implementation ---
@@ -320,7 +378,75 @@ export class TextKernel implements ITextKernel {
     this.enterAtEndCallbacks.push(callback);
   }
 
+  // --- Navigation Methods ---
+
+  setNavigationHandler(handler: NavigationHandler | null): void {
+    this.navHandler = handler;
+  }
+
+  isCursorAtStart(): boolean {
+    const { selection } = this.view.state;
+    return selection.empty && selection.from <= 1; // pos 0 is before doc, 1 is start of first text
+  }
+
+  isCursorAtEnd(): boolean {
+    const { selection, doc } = this.view.state;
+    return selection.empty && selection.to >= doc.content.size - 1;
+  }
+
+  isCursorOnFirstLine(): boolean {
+    const { selection } = this.view.state;
+    if (!selection.empty) return false;
+    try {
+      const cursorCoords = this.view.coordsAtPos(selection.from);
+      const startCoords = this.view.coordsAtPos(1); // start of content
+      return Math.abs(cursorCoords.top - startCoords.top) < 3;
+    } catch {
+      return this.isCursorAtStart();
+    }
+  }
+
+  isCursorOnLastLine(): boolean {
+    const { selection, doc } = this.view.state;
+    if (!selection.empty) return false;
+    try {
+      const cursorCoords = this.view.coordsAtPos(selection.from);
+      const endPos = Math.max(1, doc.content.size - 1);
+      const endCoords = this.view.coordsAtPos(endPos);
+      return Math.abs(cursorCoords.top - endCoords.top) < 3;
+    } catch {
+      return this.isCursorAtEnd();
+    }
+  }
+
+  focusStart(): void {
+    this.view.focus();
+    const tr = this.view.state.tr.setSelection(
+      TextSelection.create(this.view.state.doc, 1)
+    );
+    this.view.dispatch(tr);
+  }
+
+  focusEnd(): void {
+    this.view.focus();
+    const endPos = Math.max(1, this.view.state.doc.content.size - 1);
+    const tr = this.view.state.tr.setSelection(
+      TextSelection.create(this.view.state.doc, endPos)
+    );
+    this.view.dispatch(tr);
+  }
+
+  selectAll(): void {
+    this.view.focus();
+    const { doc } = this.view.state;
+    const tr = this.view.state.tr.setSelection(
+      TextSelection.create(doc, 1, Math.max(1, doc.content.size - 1))
+    );
+    this.view.dispatch(tr);
+  }
+
   destroy(): void {
+    this.navHandler = null;
     this.view.destroy();
     this.updateCallbacks = [];
     this.selectionUpdateCallbacks = [];

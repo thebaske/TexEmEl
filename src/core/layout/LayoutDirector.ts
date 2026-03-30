@@ -21,6 +21,7 @@ import { LayoutReconciler } from './LayoutReconciler';
 import { SplitResizeManager } from './SplitResizeManager';
 import { EdgeSplitManager } from './EdgeSplitManager';
 import { OverflowDetector } from './OverflowDetector';
+import { NavigationController } from './NavigationController';
 import {
   type LayoutNode,
   type LeafNode,
@@ -75,6 +76,7 @@ export class LayoutDirector {
   private edgeSplitManager: EdgeSplitManager | null = null;
 
   private overflowDetector = new OverflowDetector();
+  private navigationController: NavigationController | null = null;
 
   // Kernel factory — injected by consumer
   private kernelFactory: ((node: BlockNode, el: HTMLElement, block: Block) => ITextKernel) | null = null;
@@ -117,20 +119,38 @@ export class LayoutDirector {
     this.activePageId = this.pages[0].id;
     this.metadata = doc.metadata;
 
+    // Create navigation controller (cross-block keyboard movement)
+    this.navigationController = new NavigationController(
+      null as any, // pool not created yet — will be set below
+      {
+        onActiveCellChange: (cellId) => this.setActiveCell(cellId),
+        onFocusedBlockChange: (blockId) => { this.focusedBlockId = blockId; this.emitToolbarUpdate(); },
+        onBlockCreated: (cellId, block) => {
+          const page = getPageForCell(this.pages, cellId);
+          if (page) {
+            this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, block));
+          }
+          this.debouncedSync();
+        },
+      },
+    );
+
     // Create subsystems
     this.cellPool = new CellPool({
       kernelFactory: this.kernelFactory!,
       onContentChange: (cellId: string) => {
         this.debouncedSync();
         this.emitToolbarUpdate();
-        // Check if this is the last cell on the last page and it overflows
-        // → one-shot page creation for paste/large content
         this.checkLastCellOverflow(cellId);
       },
       onSelectionChange: (_cellId: string) => {
         this.emitToolbarUpdate();
       },
+      navigationController: this.navigationController,
     });
+
+    // Now that pool exists, update the controller's reference
+    (this.navigationController as any).cellPool = this.cellPool;
 
     this.reconciler = new LayoutReconciler(this.cellPool, {
       onCellClick: (cellId, e) => this.handleCellClick(cellId, e),
@@ -139,6 +159,9 @@ export class LayoutDirector {
 
     // Initial render
     this.reconciler.reconcilePages(container, this.pages);
+
+    // Build navigation sequence
+    this.navigationController.rebuildSequence(this.pages);
 
     // After initial render, check if content exceeds the first page
     // and distribute across pages if needed (for file open / large documents)
@@ -185,20 +208,34 @@ export class LayoutDirector {
     this.reconciler.destroy();
     this.cellPool.destroy();
 
+    // Recreate navigation controller
+    this.navigationController = new NavigationController(null as any, {
+      onActiveCellChange: (cellId) => this.setActiveCell(cellId),
+      onFocusedBlockChange: (blockId) => { this.focusedBlockId = blockId; this.emitToolbarUpdate(); },
+      onBlockCreated: (cellId, block) => {
+        const page = getPageForCell(this.pages, cellId);
+        if (page) {
+          this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, block));
+        }
+        this.debouncedSync();
+      },
+    });
+
     // Recreate pool (factory references are preserved)
     this.cellPool = new CellPool({
       kernelFactory: this.kernelFactory!,
       onContentChange: (cellId: string) => {
         this.debouncedSync();
         this.emitToolbarUpdate();
-        // Check if this is the last cell on the last page and it overflows
-        // → one-shot page creation for paste/large content
         this.checkLastCellOverflow(cellId);
       },
       onSelectionChange: (_cellId: string) => {
         this.emitToolbarUpdate();
       },
+      navigationController: this.navigationController,
     });
+
+    (this.navigationController as any).cellPool = this.cellPool;
 
     // Rebuild reconciler with new pool
     this.reconciler = new LayoutReconciler(this.cellPool, {
@@ -214,6 +251,7 @@ export class LayoutDirector {
     this.focusedBlockId = null;
 
     this.reconciler.reconcilePages(this.container, this.pages);
+    this.navigationController.rebuildSequence(this.pages);
 
     // Distribute across pages if content exceeds first page
     requestAnimationFrame(() => {
@@ -268,6 +306,7 @@ export class LayoutDirector {
     this.updatePageLayout(page.id, newLayout);
 
     this.reconciler.reconcilePages(this.container!, this.pages);
+    this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
 
@@ -314,6 +353,7 @@ export class LayoutDirector {
 
     this.activeCellId = mergedCell?.id ?? null;
     this.focusedBlockId = null;
+    this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
 
@@ -826,6 +866,7 @@ export class LayoutDirector {
       remaining = newCell.trimFrom(newFitCount);
     }
 
+    this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
 

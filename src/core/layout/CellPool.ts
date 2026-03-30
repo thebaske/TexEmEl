@@ -18,6 +18,7 @@ export interface CellPoolConfig {
   kernelFactory: KernelFactory;
   onContentChange?: (cellId: string) => void;
   onSelectionChange?: (cellId: string) => void;
+  navigationController?: import('./NavigationController').NavigationController;
 }
 
 // --- CellPool ---
@@ -61,6 +62,7 @@ export class CellPool {
       blockRenderer: this.blockRenderer,
       onContentChange: this.config.onContentChange,
       onSelectionChange: this.config.onSelectionChange,
+      navigationController: this.config.navigationController,
     }, initialBlocks);
 
     this.cells.set(cellId, cell);

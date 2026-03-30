@@ -147,4 +147,36 @@ export interface ITextKernel {
   removeLink(): void;
   /** Get the ProseMirror view for advanced operations */
   getView(): unknown;
+
+  // --- Navigation (cross-block keyboard movement) ---
+
+  /** Check if cursor is at the very start of the document (position 0) */
+  isCursorAtStart(): boolean;
+  /** Check if cursor is at the very end of the document */
+  isCursorAtEnd(): boolean;
+  /** Check if cursor is on the first visual line (for ArrowUp boundary) */
+  isCursorOnFirstLine(): boolean;
+  /** Check if cursor is on the last visual line (for ArrowDown boundary) */
+  isCursorOnLastLine(): boolean;
+  /** Place cursor at the start and focus */
+  focusStart(): void;
+  /** Place cursor at the end and focus */
+  focusEnd(): void;
+  /** Select all content in this editor */
+  selectAll(): void;
+  /** Set the navigation handler for cross-block movement */
+  setNavigationHandler(handler: NavigationHandler | null): void;
+}
+
+// --- Navigation Handler ---
+
+/** Callback interface for cross-block keyboard navigation.
+ *  TextKernel calls these when cursor hits a document boundary. */
+export interface NavigationHandler {
+  /** Cursor reached a boundary — request focus transfer */
+  onBoundary(direction: 'up' | 'down' | 'left' | 'right'): void;
+  /** Enter pressed at end of last block — create new paragraph */
+  onEnterAtEnd(): void;
+  /** Ctrl+A pressed — select all in cell */
+  onSelectAll(): void;
 }

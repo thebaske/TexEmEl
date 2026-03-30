@@ -26,6 +26,7 @@ export interface CellInstanceConfig {
   blockRenderer: BlockRenderer;
   onContentChange?: (cellId: string) => void;
   onSelectionChange?: (cellId: string) => void;
+  navigationController?: import('./NavigationController').NavigationController;
 }
 
 // --- CellInstance ---
@@ -359,6 +360,12 @@ export class CellInstance {
     node.kernel.onSelectionUpdate?.(() => {
       this.config.onSelectionChange?.(this.id);
     });
+
+    // Wire navigation handler for cross-block keyboard movement
+    if (this.config.navigationController) {
+      const handler = this.config.navigationController.createHandler(this.id, node.id);
+      node.kernel.setNavigationHandler(handler);
+    }
   }
 
   private updateEmptyState(): void {

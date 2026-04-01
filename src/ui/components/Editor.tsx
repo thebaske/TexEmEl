@@ -33,7 +33,7 @@ export function Editor({ document, onDocumentChange, onEditorReady }: EditorProp
 
     // Set up TextKernel factory — this is how ProseMirror gets mounted inside blocks
     engine.setKernelFactory((_node: BlockNode, contentEl: HTMLElement, block: Block) => {
-      return new TextKernel(contentEl, block);
+      return new TextKernel(contentEl, [block]);
     });
 
     // Mount with initial document

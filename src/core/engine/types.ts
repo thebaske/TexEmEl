@@ -104,79 +104,80 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 
 // --- Text Kernel Interface ---
 
-/** Interface that TextKernel must implement — used by BlockNode without importing ProseMirror */
+/** Interface for the cell-level ProseMirror editor.
+ *  One kernel per cell — manages the full PM document. */
 export interface ITextKernel {
-  /** Get the current inline content from ProseMirror */
+  // --- Content ---
+
+  /** Read all blocks from the PM document (one Block per top-level PM node) */
+  getBlocks(): Block[];
+  /** Replace the entire PM document with new blocks */
+  setBlocks(blocks: Block[]): void;
+  /** Legacy single-block read (backward compat) */
   getContent(): Block;
-  /** Set content from a Block (external update) */
+  /** Legacy single-block write (backward compat) */
   setContent(block: Block): void;
-  /** Toggle a mark on the current selection */
+
+  // --- Overflow ---
+
+  /** Get the scrollHeight of the PM document */
+  getDocHeight(): number;
+  /** Split the PM doc at maxHeight. Keeps "before" in editor, returns "after" as Block[]. */
+  splitAt(maxHeight: number): Block[];
+
+  // --- Formatting ---
+
   toggleMark(markType: string, attrs?: Record<string, unknown>): void;
-  /** Get active marks at current cursor position */
   getActiveMarks(): TextMark[];
-  /** Focus the ProseMirror editor */
-  focus(): void;
-  /** Blur the ProseMirror editor */
-  blur(): void;
-  /** Attempt undo — returns true if handled */
-  undo(): boolean;
-  /** Attempt redo — returns true if handled */
-  redo(): boolean;
-  /** Register update callback (doc changes) */
-  onUpdate(callback: () => void): void;
-  /** Register selection change callback (cursor moves without doc change) */
-  onSelectionUpdate?(callback: () => void): void;
-  /** Register callback for when Enter is pressed at end of document (create new block) */
-  onEnterAtEnd?(callback: () => void): void;
-  /** Cleanup */
-  destroy(): void;
-
-  // --- Phase 6 additions ---
-
-  /** Set text alignment on the current block node */
   setTextAlign(align: string): void;
-  /** Get current text alignment */
   getTextAlign(): string;
-  /** Set font family on selection */
   setFontFamily(family: string): void;
-  /** Set font size on selection */
   setFontSize(size: string): void;
-  /** Insert or edit a link on the selection */
   insertLink(href: string, title?: string): void;
-  /** Remove link from selection */
   removeLink(): void;
-  /** Get the ProseMirror view for advanced operations */
-  getView(): unknown;
 
-  // --- Navigation (cross-block keyboard movement) ---
+  // --- Block Type ---
 
-  /** Check if cursor is at the very start of the document (position 0) */
-  isCursorAtStart(): boolean;
-  /** Check if cursor is at the very end of the document */
-  isCursorAtEnd(): boolean;
-  /** Place cursor at the start and focus */
+  /** Get the type of the block at cursor position */
+  getCurrentBlockType(): { type: string; level?: number } | null;
+  /** Change block type at cursor (paragraph ↔ heading) */
+  setBlockType(type: string): void;
+
+  // --- Focus & Cursor ---
+
+  focus(): void;
+  blur(): void;
   focusStart(): void;
-  /** Place cursor at the end and focus */
   focusEnd(): void;
-  /** Focus the first or last line, placing cursor at the closest position to targetX */
   focusLineAtX(line: 'first' | 'last', targetX: number | null): void;
+  selectAll(): void;
+  isCursorAtStart(): boolean;
+  isCursorAtEnd(): boolean;
+
+  // --- Goal Column ---
+
   /** Stored cursor X from last boundary crossing (for goal-column preservation) */
   lastCursorX: number | null;
-  /** Select all content in this editor */
-  selectAll(): void;
-  /** Set the navigation handler for cross-block movement */
+
+  // --- Navigation ---
+
   setNavigationHandler(handler: NavigationHandler | null): void;
+
+  // --- Lifecycle ---
+
+  onUpdate(callback: () => void): void;
+  onSelectionUpdate?(callback: () => void): void;
+  undo(): boolean;
+  redo(): boolean;
+  destroy(): void;
+  getView(): unknown;
 }
 
 // --- Navigation Handler ---
 
-/** Callback interface for cross-block keyboard navigation.
- *  TextKernel calls these when cursor hits a document boundary. */
+/** Callback interface for cross-cell keyboard navigation.
+ *  TextKernel calls these when cursor hits a cell boundary. */
 export interface NavigationHandler {
-  /** Cursor reached a boundary — request focus transfer */
+  /** Cursor reached a cell boundary — request focus transfer */
   onBoundary(direction: 'up' | 'down' | 'left' | 'right'): void;
-  /** Enter pressed at end of last block — create new paragraph */
-  onEnterAtEnd(): void;
-  /** Ctrl+A pressed — select all in cell */
-  onSelectAll(): void;
 }

@@ -1,29 +1,24 @@
 // ============================================================================
-// CellInstance — Persistent cell that owns its DOM + ProseMirror kernels
+// CellInstance — Persistent cell that owns ONE ProseMirror editor
 //
 // A CellInstance is created ONCE and lives until the cell is explicitly removed
 // (merge or page deletion). Split/resize operations reparent the cell's DOM
 // element without destroying it — ProseMirror survives reparenting.
 //
-// This is the SINGLE authority for a cell's content. No dual tree-vs-kernel
-// state. The cell owns its blocks, period.
+// Each cell has a SINGLE TextKernel (ProseMirror editor) that manages all
+// paragraphs, headings, etc. within the cell. PM handles navigation, Enter,
+// paste, and formatting natively. No BlockNode layer.
 // ============================================================================
 
-import type { Block, InlineContent } from '../model/DocumentTree';
+import type { Block } from '../model/DocumentTree';
 import type { ITextKernel } from '../engine/types';
-import type { BlockNode } from '../engine/BlockNode';
-import { BlockRenderer } from '../engine/BlockRenderer';
-import { BlockRegistry } from '../engine/BlockRegistry';
-import { generateBlockId } from '../engine/BlockId';
 
 // --- Types ---
 
-export type KernelFactory = (node: BlockNode, el: HTMLElement, block: Block) => ITextKernel;
+export type KernelFactory = (el: HTMLElement, blocks: Block[]) => ITextKernel;
 
 export interface CellInstanceConfig {
   kernelFactory: KernelFactory;
-  registry: BlockRegistry;
-  blockRenderer: BlockRenderer;
   onContentChange?: (cellId: string) => void;
   onSelectionChange?: (cellId: string) => void;
   navigationController?: import('./NavigationController').NavigationController;
@@ -36,7 +31,7 @@ export class CellInstance {
   readonly element: HTMLElement;
   readonly contentElement: HTMLElement;
 
-  private blocks: BlockNode[] = [];
+  private kernel: ITextKernel | null = null;
   private config: CellInstanceConfig;
 
   constructor(id: string, config: CellInstanceConfig, initialBlocks: Block[] = []) {
@@ -52,248 +47,110 @@ export class CellInstance {
     this.contentElement.classList.add('bsp-cell-content');
     this.element.appendChild(this.contentElement);
 
-    // Render initial blocks
-    if (initialBlocks.length > 0) {
-      for (const block of initialBlocks) {
-        this.createAndAppendBlock(block);
-      }
-    } else {
-      this.contentElement.classList.add('bsp-cell-empty');
-    }
+    // Create the single ProseMirror editor for this cell
+    this.kernel = config.kernelFactory(this.contentElement, initialBlocks);
+    this.wireKernelCallbacks();
+
+    this.updateEmptyState();
+  }
+
+  // =====================
+  //  KERNEL ACCESS
+  // =====================
+
+  /** Get the cell's TextKernel (ProseMirror editor) */
+  getKernel(): ITextKernel | null {
+    return this.kernel;
   }
 
   // =====================
   //  CONTENT READS
   // =====================
 
-  /** Read live content from kernels — always authoritative */
+  /** Read live content from the kernel — always authoritative */
   getContent(): Block[] {
-    return this.blocks.map(bn => bn.getData());
+    if (!this.kernel) return [];
+    return this.kernel.getBlocks();
   }
 
-  /** Get the live BlockNode instances */
-  getBlockNodes(): BlockNode[] {
-    return this.blocks;
-  }
-
-  /** Number of blocks in this cell */
-  blockCount(): number {
-    return this.blocks.length;
-  }
-
-  /** Is this cell empty? */
+  /** Is this cell empty? (no content or only empty paragraph) */
   isEmpty(): boolean {
-    return this.blocks.length === 0;
-  }
-
-  /** Find a BlockNode by ID */
-  getBlockNode(blockId: string): BlockNode | undefined {
-    return this.blocks.find(bn => bn.id === blockId);
+    if (!this.kernel) return true;
+    const blocks = this.kernel.getBlocks();
+    if (blocks.length === 0) return true;
+    if (blocks.length === 1 && blocks[0].type === 'paragraph') {
+      const p = blocks[0];
+      if ('content' in p && (!p.content || p.content.length === 0)) return true;
+    }
+    return false;
   }
 
   // =====================
   //  CONTENT MUTATIONS
-  //  All local DOM operations — no global render
   // =====================
 
-  /** Add a block at the end or at a specific index */
-  addBlock(block: Block, index?: number): BlockNode {
-    const blockWithId = block.id ? block : { ...block, id: generateBlockId() };
-    const node = this.createAndAppendBlock(blockWithId, index);
-    this.updateEmptyState();
-    return node;
-  }
-
-  /** Remove trailing blocks starting from index. Returns the removed block data. */
-  trimFrom(index: number): Block[] {
-    if (index >= this.blocks.length) return [];
-
-    const removed = this.blocks.splice(index);
-    const removedData: Block[] = [];
-
-    for (const bn of removed) {
-      removedData.push(bn.getData());
-      this.config.registry.unregister(bn.id);
-      bn.destroy(); // removes DOM, destroys kernel
-    }
-
-    this.updateEmptyState();
-    return removedData;
-  }
-
-  /** Receive overflow blocks from a previous cell — prepend at the top */
-  prependBlocks(blocks: Block[]): void {
-    const firstExisting = this.contentElement.firstChild;
-
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const block = blocks[i];
-      const node = this.createBlockNode(block);
-      this.config.registry.register(node);
-      this.blocks.unshift(node);
-
-      if (firstExisting) {
-        this.contentElement.insertBefore(node.element, firstExisting);
-      } else {
-        this.contentElement.appendChild(node.element);
-      }
-    }
-
+  /** Replace all content in this cell */
+  setContent(blocks: Block[]): void {
+    if (!this.kernel) return;
+    this.kernel.setBlocks(blocks);
     this.updateEmptyState();
   }
 
   /** Append blocks at the end (for merge — absorb sibling's content) */
   appendBlocks(blocks: Block[]): void {
-    for (const block of blocks) {
-      this.createAndAppendBlock(block);
-    }
+    if (!this.kernel || blocks.length === 0) return;
+    const current = this.kernel.getBlocks();
+    // Filter out empty paragraphs from current if we're appending real content
+    const filtered = current.length === 1 && this.isEmpty() ? [] : current;
+    this.kernel.setBlocks([...filtered, ...blocks]);
     this.updateEmptyState();
   }
 
-  /** Remove all blocks and return their data (for merge — this cell is being absorbed) */
+  /** Remove all content and return it (for merge — this cell is being absorbed) */
   drainAll(): Block[] {
-    const data = this.getContent();
-
-    for (const bn of this.blocks) {
-      this.config.registry.unregister(bn.id);
-      bn.destroy();
-    }
-    this.blocks = [];
-
-    this.updateEmptyState();
-    return data;
-  }
-
-  /**
-   * Replace a block at a specific index with new data.
-   * Destroys the old block and creates a new one in its place.
-   * Used for line-level overflow splitting (replacing a paragraph with its first half).
-   */
-  replaceBlock(index: number, newBlockData: Block): BlockNode | null {
-    if (index < 0 || index >= this.blocks.length) return null;
-
-    const old = this.blocks[index];
-    const refElement = old.element.nextSibling;
-
-    // Destroy old
-    this.config.registry.unregister(old.id);
-    old.destroy();
-
-    // Create new
-    const node = this.createBlockNode(newBlockData);
-    this.config.registry.register(node);
-    this.blocks[index] = node;
-
-    // Insert at same position
-    if (refElement) {
-      this.contentElement.insertBefore(node.element, refElement);
-    } else {
-      this.contentElement.appendChild(node.element);
-    }
-
-    return node;
-  }
-
-  /** Remove a specific block by ID */
-  removeBlock(blockId: string): Block | null {
-    const index = this.blocks.findIndex(bn => bn.id === blockId);
-    if (index === -1) return null;
-
-    const [bn] = this.blocks.splice(index, 1);
-    const data = bn.getData();
-    this.config.registry.unregister(bn.id);
-    bn.destroy();
-
+    if (!this.kernel) return [];
+    const data = this.kernel.getBlocks();
+    this.kernel.setBlocks([]);
     this.updateEmptyState();
     return data;
   }
 
   // =====================
-  //  NORMALIZATION
+  //  OVERFLOW SPLIT
   // =====================
 
   /**
-   * Split multi-paragraph ProseMirror editors into individual blocks.
-   * Paste creates ONE PM editor with multiple <p> elements.
-   * This splits them into separate BlockNodes so page overflow
-   * can measure and split at block boundaries.
-   * Returns true if any blocks were split.
+   * Split content at the given pixel height.
+   * Keeps the portion that fits in this cell.
+   * Returns the overflow portion as Block[].
    */
-  normalizeBlocks(): boolean {
-    let changed = false;
-    const newBlocks: BlockNode[] = [];
+  splitOverflow(maxHeight: number): Block[] {
+    if (!this.kernel) return [];
+    return this.kernel.splitAt(maxHeight);
+  }
 
-    for (const bn of this.blocks) {
-      const data = bn.getData();
-      const split = splitBlockByBreaks(data);
-
-      if (split.length > 1) {
-        changed = true;
-        const refElement = bn.element.nextSibling;
-
-        this.config.registry.unregister(bn.id);
-        bn.destroy();
-
-        for (const blockData of split) {
-          const node = this.createBlockNode(blockData);
-          this.config.registry.register(node);
-
-          if (refElement) {
-            this.contentElement.insertBefore(node.element, refElement);
-          } else {
-            this.contentElement.appendChild(node.element);
-          }
-          newBlocks.push(node);
-        }
-      } else {
-        newBlocks.push(bn);
-      }
-    }
-
-    if (changed) {
-      this.blocks = newBlocks;
-      this.updateEmptyState();
-    }
-    return changed;
+  /** Check if the cell's content overflows its visible area */
+  hasOverflow(): boolean {
+    return this.contentElement.scrollHeight > this.contentElement.clientHeight + 1;
   }
 
   // =====================
   //  FOCUS
   // =====================
 
-  /** Focus the last editable block in this cell */
-  focusLastEditable(): BlockNode | null {
-    for (let i = this.blocks.length - 1; i >= 0; i--) {
-      const bn = this.blocks[i];
-      if (bn.isEditable() && bn.kernel) {
-        bn.kernel.focus();
-        return bn;
-      }
-    }
-    return null;
+  /** Focus the editor at the end */
+  focusEnd(): void {
+    this.kernel?.focusEnd();
   }
 
-  /** Focus a specific block by ID */
-  focusBlock(blockId: string): boolean {
-    const bn = this.getBlockNode(blockId);
-    if (bn?.isEditable() && bn.kernel) {
-      bn.kernel.focus();
-      return true;
-    }
-    return false;
+  /** Focus the editor at the start */
+  focusStart(): void {
+    this.kernel?.focusStart();
   }
 
-  /** Ensure the cell has at least one editable block, creating one if needed */
-  ensureEditable(): BlockNode {
-    if (this.blocks.length === 0) {
-      return this.addBlock({ type: 'paragraph', content: [], id: generateBlockId() });
-    }
-
-    // Find an existing editable block
-    const editable = this.blocks.find(bn => bn.isEditable());
-    if (editable) return editable;
-
-    // No editable blocks — add a paragraph
-    return this.addBlock({ type: 'paragraph', content: [], id: generateBlockId() });
+  /** Focus the editor (just focus, no cursor positioning) */
+  focus(): void {
+    this.kernel?.focus();
   }
 
   // =====================
@@ -308,13 +165,12 @@ export class CellInstance {
   //  LIFECYCLE
   // =====================
 
-  /** Destroy this cell — remove all blocks, remove DOM */
+  /** Destroy this cell — destroy kernel, remove DOM */
   destroy(): void {
-    for (const bn of this.blocks) {
-      this.config.registry.unregister(bn.id);
-      bn.destroy();
+    if (this.kernel) {
+      this.kernel.destroy();
+      this.kernel = null;
     }
-    this.blocks = [];
     this.element.remove();
   }
 
@@ -322,88 +178,26 @@ export class CellInstance {
   //  INTERNAL
   // =====================
 
-  private createAndAppendBlock(block: Block, index?: number): BlockNode {
-    const node = this.createBlockNode(block);
-    this.config.registry.register(node);
+  private wireKernelCallbacks(): void {
+    if (!this.kernel) return;
 
-    if (index !== undefined && index >= 0 && index < this.blocks.length) {
-      const refNode = this.blocks[index];
-      this.contentElement.insertBefore(node.element, refNode.element);
-      this.blocks.splice(index, 0, node);
-    } else {
-      this.contentElement.appendChild(node.element);
-      this.blocks.push(node);
-    }
-
-    return node;
-  }
-
-  private createBlockNode(block: Block): BlockNode {
-    const node = this.config.blockRenderer.createSingleBlock(block, false);
-
-    // Wire up kernel callbacks for content/selection change propagation
-    if (node.kernel) {
-      this.wireKernelCallbacks(node);
-    }
-
-    return node;
-  }
-
-  private wireKernelCallbacks(node: BlockNode): void {
-    if (!node.kernel) return;
-
-    node.kernel.onUpdate(() => {
-      node.onKernelChange();
+    this.kernel.onUpdate(() => {
+      this.updateEmptyState();
       this.config.onContentChange?.(this.id);
     });
 
-    node.kernel.onSelectionUpdate?.(() => {
+    this.kernel.onSelectionUpdate?.(() => {
       this.config.onSelectionChange?.(this.id);
     });
 
-    // Wire navigation handler for cross-block keyboard movement
+    // Wire navigation handler for cross-cell keyboard movement
     if (this.config.navigationController) {
-      const handler = this.config.navigationController.createHandler(this.id, node.id);
-      node.kernel.setNavigationHandler(handler);
+      const handler = this.config.navigationController.createHandler(this.id);
+      this.kernel.setNavigationHandler(handler);
     }
   }
 
   private updateEmptyState(): void {
-    this.contentElement.classList.toggle('bsp-cell-empty', this.blocks.length === 0);
+    this.contentElement.classList.toggle('bsp-cell-empty', this.isEmpty());
   }
-}
-
-// ============================================================================
-// Utility: Split a Block by its break elements into individual blocks
-// ============================================================================
-
-function splitBlockByBreaks(block: Block): Block[] {
-  if (block.type !== 'paragraph' && block.type !== 'heading') return [block];
-  if (!block.content || block.content.length === 0) return [block];
-
-  const hasBreaks = block.content.some((item: InlineContent) => item.type === 'break');
-  if (!hasBreaks) return [block];
-
-  const segments: InlineContent[][] = [[]];
-  for (const item of block.content) {
-    if (item.type === 'break') {
-      segments.push([]);
-    } else {
-      segments[segments.length - 1].push(item);
-    }
-  }
-
-  if (segments.length <= 1) return [block];
-
-  return segments.map((content, i) => {
-    if (i === 0) {
-      return { ...block, content, pmDocJson: undefined };
-    }
-    return {
-      type: 'paragraph' as const,
-      content,
-      alignment: (block as any).alignment,
-      id: generateBlockId(),
-    };
-  });
 }

@@ -119,11 +119,9 @@
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
-/* Empty cell placeholder */
+/* Empty cell placeholder — overlaid on top of PM editor, doesn't affect layout */
 .bsp-cell-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
 }
 
 .bsp-cell-empty::before {
@@ -132,6 +130,10 @@
   font-size: 13px;
   font-style: italic;
   pointer-events: none;
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  z-index: 1;
 }
 
 /* Active cell highlight — only show when multiple cells exist */

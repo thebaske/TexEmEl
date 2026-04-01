@@ -9,7 +9,6 @@ import { useEffect, useRef } from 'react';
 import type { DocumentTree } from '../../core/model/DocumentTree';
 import { LayoutDirector } from '../../core/layout/LayoutDirector';
 import { TextKernel } from '../../core/engine/TextKernel';
-import type { BlockNode } from '../../core/engine/BlockNode';
 import type { Block } from '../../core/model/DocumentTree';
 
 // Import BSP styles
@@ -36,8 +35,8 @@ export function BspEditor({ document, onDocumentChange, onEditorReady }: BspEdit
     const engine = new LayoutDirector({ debounceMs: 150 });
 
     // Set up TextKernel factory
-    engine.setKernelFactory((_node: BlockNode, contentEl: HTMLElement, block: Block) => {
-      return new TextKernel(contentEl, block);
+    engine.setKernelFactory((contentEl: HTMLElement, blocks: Block[]) => {
+      return new TextKernel(contentEl, blocks);
     });
 
     // Mount with initial document

@@ -7,9 +7,6 @@
 // ============================================================================
 
 import type { Block } from '../model/DocumentTree';
-import type { BlockNode } from '../engine/BlockNode';
-import { BlockRenderer } from '../engine/BlockRenderer';
-import { BlockRegistry } from '../engine/BlockRegistry';
 import { CellInstance, type KernelFactory } from './CellInstance';
 
 // --- Types ---
@@ -25,22 +22,10 @@ export interface CellPoolConfig {
 
 export class CellPool {
   private cells = new Map<string, CellInstance>();
-  private registry: BlockRegistry;
-  private blockRenderer: BlockRenderer;
   private config: CellPoolConfig;
 
   constructor(config: CellPoolConfig) {
     this.config = config;
-    this.registry = new BlockRegistry();
-    this.blockRenderer = new BlockRenderer(this.registry);
-
-    // Wire up the kernel factory into the block renderer
-    this.blockRenderer.setMountKernel(
-      (node: BlockNode, contentEl: HTMLElement, block: Block) => {
-        const kernel = this.config.kernelFactory(node, contentEl, block);
-        node.mountKernel(kernel);
-      },
-    );
   }
 
   // =====================
@@ -58,8 +43,6 @@ export class CellPool {
 
     const cell = new CellInstance(cellId, {
       kernelFactory: this.config.kernelFactory,
-      registry: this.registry,
-      blockRenderer: this.blockRenderer,
       onContentChange: this.config.onContentChange,
       onSelectionChange: this.config.onSelectionChange,
       navigationController: this.config.navigationController,
@@ -111,11 +94,6 @@ export class CellPool {
     return Array.from(this.cells.keys());
   }
 
-  /** Get the shared block registry */
-  getRegistry(): BlockRegistry {
-    return this.registry;
-  }
-
   /** Number of active cells */
   size(): number {
     return this.cells.size;
@@ -141,12 +119,11 @@ export class CellPool {
   //  CLEANUP
   // =====================
 
-  /** Destroy all cells and the registry */
+  /** Destroy all cells */
   destroy(): void {
     for (const cell of this.cells.values()) {
       cell.destroy();
     }
     this.cells.clear();
-    this.registry.clear();
   }
 }

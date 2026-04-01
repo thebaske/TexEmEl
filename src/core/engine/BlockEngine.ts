@@ -91,10 +91,7 @@ export class BlockEngine {
         this.emitToolbarUpdate();
       });
 
-      // When Enter is pressed at end of an empty last paragraph, create a new block
-      kernel.onEnterAtEnd?.(() => {
-        this.insertBlockAfter(node.id, { type: 'paragraph', content: [] });
-      });
+      // onEnterAtEnd removed — PM handles Enter natively in one-PM-per-cell architecture
     });
   }
 

@@ -1,30 +1,28 @@
 // ============================================================================
-// LayoutDirector — BSP Layout Orchestrator (No-Flow Architecture)
+// LayoutDirector — BSP Layout Orchestrator (One-PM-Per-Cell Architecture)
 //
-// Each cell owns its content independently. No overflow, no flow, no stream.
-// Content stays where the user puts it. Cells scroll when content exceeds
-// their bounds. The user is the layout engine.
+// Each cell owns ONE ProseMirror editor. PM handles all text operations
+// (navigation, Enter, paste, formatting) natively within a cell.
+// LayoutDirector handles layout operations (split, merge, resize, overflow).
 //
 // Delegates to:
-//   - CellPool: persistent cell instances
+//   - CellPool: persistent cell instances (each with one PM editor)
 //   - LayoutReconciler: diff-based DOM updates
 //   - SplitResizeManager: drag resize handles
 //   - EdgeSplitManager: edge-pull-to-split
+//   - NavigationController: cross-cell keyboard navigation
 // ============================================================================
 
 import type { Block, DocumentTree, TextMark } from '../model/DocumentTree';
 import type { ITextKernel } from '../engine/types';
-import type { BlockNode } from '../engine/BlockNode';
 import { generateBlockId, assignBlockIds } from '../engine/BlockId';
 import { CellPool } from './CellPool';
 import { LayoutReconciler } from './LayoutReconciler';
 import { SplitResizeManager } from './SplitResizeManager';
 import { EdgeSplitManager } from './EdgeSplitManager';
-import { OverflowDetector } from './OverflowDetector';
 import { NavigationController } from './NavigationController';
 import {
   type LayoutNode,
-  type LeafNode,
   type SplitDirection,
   createDefaultLayout,
   splitCell,
@@ -33,9 +31,6 @@ import {
   findNode,
   findParent,
   getAllLeaves,
-  insertBlockInCell,
-  removeBlockFromCell,
-  updateLeafBlocks,
 } from './LayoutTree';
 import {
   type Page,
@@ -67,19 +62,16 @@ export class LayoutDirector {
   private metadata: DocumentTree['metadata'] = {};
   private activeCellId: string | null = null;
   private activePageId: string | null = null;
-  private focusedBlockId: string | null = null;
 
   // Subsystems
   private cellPool: CellPool | null = null;
   private reconciler: LayoutReconciler | null = null;
   private resizeManager: SplitResizeManager | null = null;
   private edgeSplitManager: EdgeSplitManager | null = null;
-
-  private overflowDetector = new OverflowDetector();
   private navigationController: NavigationController | null = null;
 
   // Kernel factory — injected by consumer
-  private kernelFactory: ((node: BlockNode, el: HTMLElement, block: Block) => ITextKernel) | null = null;
+  private kernelFactory: ((el: HTMLElement, blocks: Block[]) => ITextKernel) | null = null;
 
   // Callbacks
   private onChangeCallbacks: OnLayoutChangeCallback[] = [];
@@ -101,7 +93,7 @@ export class LayoutDirector {
   //  LIFECYCLE
   // =====================
 
-  setKernelFactory(factory: (node: BlockNode, el: HTMLElement, block: Block) => ITextKernel): void {
+  setKernelFactory(factory: (el: HTMLElement, blocks: Block[]) => ITextKernel): void {
     this.kernelFactory = factory;
   }
 
@@ -119,19 +111,11 @@ export class LayoutDirector {
     this.activePageId = this.pages[0].id;
     this.metadata = doc.metadata;
 
-    // Create navigation controller (cross-block keyboard movement)
+    // Create navigation controller (cross-cell keyboard movement)
     this.navigationController = new NavigationController(
       null as any, // pool not created yet — will be set below
       {
         onActiveCellChange: (cellId) => this.setActiveCell(cellId),
-        onFocusedBlockChange: (blockId) => { this.focusedBlockId = blockId; this.emitToolbarUpdate(); },
-        onBlockCreated: (cellId, block) => {
-          const page = getPageForCell(this.pages, cellId);
-          if (page) {
-            this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, block));
-          }
-          this.debouncedSync();
-        },
       },
     );
 
@@ -164,7 +148,6 @@ export class LayoutDirector {
     this.navigationController.rebuildSequence(this.pages);
 
     // After initial render, check if content exceeds the first page
-    // and distribute across pages if needed (for file open / large documents)
     requestAnimationFrame(() => {
       const leaves = getAllLeaves(this.pages[0].layout);
       const lastLeafId = leaves[leaves.length - 1]?.id;
@@ -204,24 +187,16 @@ export class LayoutDirector {
   update(doc: DocumentTree): void {
     if (!this.container || !this.cellPool || !this.reconciler) return;
 
-    // Destroy old subsystems first (removes orphan DOM elements)
+    // Destroy old subsystems first
     this.reconciler.destroy();
     this.cellPool.destroy();
 
     // Recreate navigation controller
     this.navigationController = new NavigationController(null as any, {
       onActiveCellChange: (cellId) => this.setActiveCell(cellId),
-      onFocusedBlockChange: (blockId) => { this.focusedBlockId = blockId; this.emitToolbarUpdate(); },
-      onBlockCreated: (cellId, block) => {
-        const page = getPageForCell(this.pages, cellId);
-        if (page) {
-          this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, block));
-        }
-        this.debouncedSync();
-      },
     });
 
-    // Recreate pool (factory references are preserved)
+    // Recreate pool
     this.cellPool = new CellPool({
       kernelFactory: this.kernelFactory!,
       onContentChange: (cellId: string) => {
@@ -248,7 +223,6 @@ export class LayoutDirector {
     this.activePageId = this.pages[0].id;
     this.metadata = doc.metadata;
     this.activeCellId = null;
-    this.focusedBlockId = null;
 
     this.reconciler.reconcilePages(this.container, this.pages);
     this.navigationController.rebuildSequence(this.pages);
@@ -291,10 +265,6 @@ export class LayoutDirector {
   //  LAYOUT OPERATIONS
   // =====================
 
-  /**
-   * Split a cell. The original cell SURVIVES (keeps its ID, DOM, ProseMirror).
-   * Only a new empty sibling cell is created.
-   */
   split(direction: SplitDirection, cellId?: string, ratio = 0.5): void {
     const targetId = cellId ?? this.activeCellId;
     if (!targetId || !this.reconciler) return;
@@ -310,7 +280,6 @@ export class LayoutDirector {
     this.syncToReact();
   }
 
-  /** Merge a cell with its sibling. Content concatenated in reading order. */
   merge(cellId?: string): void {
     const targetId = cellId ?? this.activeCellId;
     if (!targetId || !this.cellPool || !this.reconciler) return;
@@ -321,12 +290,11 @@ export class LayoutDirector {
     const parent = findParent(page.layout, targetId);
     if (!parent) return;
 
-    // Collect ALL content from both subtrees in reading order (Z-pattern)
+    // Collect ALL content from both subtrees in reading order
     const firstLeaves = getAllLeaves(parent.first);
     const secondLeaves = getAllLeaves(parent.second);
     const allContent: Block[] = [];
 
-    // Reading order: first subtree leaves, then second subtree leaves
     for (const leaf of [...firstLeaves, ...secondLeaves]) {
       const cell = this.cellPool.get(leaf.id);
       if (cell) {
@@ -334,17 +302,13 @@ export class LayoutDirector {
       }
     }
 
-    // The survivor is always the first leaf (reading order preserved)
-    const survivorId = firstLeaves[0]?.id;
-    if (!survivorId) return;
-
-    // Update tree structure (collapse the split into a single leaf)
+    // Collapse split into single leaf
     this.updatePageLayout(page.id, mergeCells(page.layout, parent.id));
 
-    // Reconcile first — this creates the merged leaf cell
+    // Reconcile
     this.reconciler.reconcilePages(this.container!, this.pages);
 
-    // Now find the merged cell and populate it with all collected content
+    // Populate merged cell with collected content
     const mergedLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
     const mergedCell = this.cellPool.get(mergedLeaves[0]?.id ?? '');
     if (mergedCell && allContent.length > 0) {
@@ -352,7 +316,6 @@ export class LayoutDirector {
     }
 
     this.activeCellId = mergedCell?.id ?? null;
-    this.focusedBlockId = null;
     this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
@@ -410,87 +373,29 @@ export class LayoutDirector {
   }
 
   getActiveBlockType(): string | null {
-    const node = this.getFocusedBlockNode();
-    if (!node) return null;
-    const data = node.getData();
-    if (data.type === 'heading') return `heading:${data.level}`;
-    return data.type;
+    const kernel = this.getActiveKernel();
+    if (!kernel) return null;
+    const info = kernel.getCurrentBlockType();
+    if (!info) return null;
+    if (info.type === 'heading') return `heading:${info.level}`;
+    return info.type;
   }
 
   setBlockType(type: string): void {
-    const node = this.getFocusedBlockNode();
-    if (!node || !this.activeCellId) return;
-
-    const cell = this.cellPool?.get(this.activeCellId);
-    if (!cell) return;
-
-    const data = node.getData();
-    if (data.type !== 'paragraph' && data.type !== 'heading') return;
-
-    const content = data.content;
-    const alignment = data.alignment;
-    let newBlock: Block;
-
-    if (type === 'paragraph') {
-      newBlock = { type: 'paragraph', content, alignment, id: data.id, containerStyle: data.containerStyle };
-    } else if (type.startsWith('heading:')) {
-      const level = parseInt(type.split(':')[1]) as 1 | 2 | 3 | 4 | 5 | 6;
-      newBlock = { type: 'heading', level, content, alignment, id: data.id, containerStyle: data.containerStyle };
-    } else {
-      return;
-    }
-
-    // Update the tree (for serialization) and re-render just this cell
-    const page = getPageForCell(this.pages, this.activeCellId);
-    if (!page) return;
-
-    const leaf = findNode(page.layout, this.activeCellId) as LeafNode | null;
-    if (!leaf || leaf.type !== 'leaf') return;
-
-    const blockIndex = leaf.blocks.findIndex(b => b.id === data.id);
-    if (blockIndex === -1) return;
-
-    const newBlocks = [...leaf.blocks];
-    newBlocks[blockIndex] = newBlock;
-    this.updatePageLayout(page.id, updateLeafBlocks(page.layout, this.activeCellId, newBlocks));
-
-    // Remove old block and insert new one at same position in the live cell
-    cell.removeBlock(data.id!);
-    const newNode = cell.addBlock(newBlock, blockIndex);
-    this.syncToReact();
-
-    // Focus the new block
-    requestAnimationFrame(() => {
-      if (newNode.isEditable() && newNode.kernel) {
-        this.focusedBlockId = newNode.id;
-        newNode.kernel.focus();
-        this.emitToolbarUpdate();
-      }
-    });
+    this.getActiveKernel()?.setBlockType(type);
   }
 
   insertBlock(block: Block): void {
-    if (!this.cellPool) return;
-
-    if (!this.activeCellId) {
-      if (this.pages.length === 0) return;
-      const leaves = getAllLeaves(this.pages[0].layout);
-      if (leaves.length === 0) return;
-      this.activeCellId = leaves[0].id;
-    }
+    // Insert into the active cell's PM editor
+    // For now, images/tables are inserted as blocks at the end
+    if (!this.activeCellId || !this.cellPool) return;
 
     const cell = this.cellPool.get(this.activeCellId);
     if (!cell) return;
 
+    const currentBlocks = cell.getContent();
     const newBlock = { ...block, id: generateBlockId() };
-    cell.addBlock(newBlock);
-
-    // Update tree for serialization
-    const page = getPageForCell(this.pages, this.activeCellId);
-    if (page) {
-      this.updatePageLayout(page.id, insertBlockInCell(page.layout, this.activeCellId, newBlock));
-    }
-
+    cell.setContent([...currentBlocks, newBlock]);
     this.syncToReact();
   }
 
@@ -510,20 +415,8 @@ export class LayoutDirector {
   }
 
   deleteSelectedBlocks(): void {
-    if (!this.activeCellId || !this.focusedBlockId || !this.cellPool) return;
-
-    const cell = this.cellPool.get(this.activeCellId);
-    if (!cell) return;
-
-    cell.removeBlock(this.focusedBlockId);
-
-    const page = getPageForCell(this.pages, this.activeCellId);
-    if (page) {
-      this.updatePageLayout(page.id, removeBlockFromCell(page.layout, this.activeCellId, this.focusedBlockId));
-    }
-
-    this.focusedBlockId = null;
-    this.syncToReact();
+    // In one-PM-per-cell, delete is handled by PM natively (backspace/delete keys)
+    // This method can be used for explicit block deletion from toolbar
   }
 
   undo(): void {
@@ -535,46 +428,32 @@ export class LayoutDirector {
   }
 
   getSelectedBlockIds(): string[] {
-    return this.focusedBlockId ? [this.focusedBlockId] : [];
+    return [];
   }
 
   getFocusedBlockId(): string | null {
-    return this.focusedBlockId;
+    return null;
   }
 
   // =====================
   //  EVENT HANDLERS
   // =====================
 
-  private handleCellClick(cellId: string, e: MouseEvent): void {
+  private handleCellClick(cellId: string, _e: MouseEvent): void {
     this.setActiveCell(cellId);
 
-    const target = e.target as HTMLElement;
-    const blockEl = target.closest('[data-block-id]') as HTMLElement;
-
-    if (blockEl) {
-      const blockId = blockEl.dataset.blockId!;
-      const registry = this.cellPool?.getRegistry();
-      const node = registry?.get(blockId);
-      if (node?.isEditable() && node.kernel) {
-        this.focusedBlockId = blockId;
-        node.kernel.focus();
-        this.emitToolbarUpdate();
-        return;
-      }
-      this.focusedBlockId = blockId;
+    // Focus the cell's editor — PM handles click-to-cursor natively
+    const cell = this.cellPool?.get(cellId);
+    if (cell) {
+      cell.focus();
       this.emitToolbarUpdate();
-      return;
     }
-
-    // Clicked empty area of cell — ensure editable and focus
-    this.autoFocusInCell(cellId);
-    this.emitToolbarUpdate();
   }
 
   private handleCellDblClick(cellId: string): void {
     this.setActiveCell(cellId);
-    this.autoFocusInCell(cellId);
+    const cell = this.cellPool?.get(cellId);
+    cell?.focus();
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
@@ -627,7 +506,7 @@ export class LayoutDirector {
     if (page) {
       const parent = findParent(page.layout, cellId);
 
-      // --- Spatial merge options: find adjacent cells by bounding rect ---
+      // Spatial merge options
       const neighbors = this.findSpatialNeighbors(page, cellId);
       if (neighbors.up) {
         items.push({ label: 'Merge Up', action: () => this.spatialMerge(cellId, neighbors.up!) });
@@ -642,7 +521,7 @@ export class LayoutDirector {
         items.push({ label: 'Merge Right', action: () => this.spatialMerge(cellId, neighbors.right!) });
       }
 
-      // --- Delete Cell: collapse this cell, sibling expands ---
+      // Delete Cell
       if (parent) {
         items.push({ label: 'Delete Cell', action: () => this.deleteCell(cellId) });
       }
@@ -686,11 +565,6 @@ export class LayoutDirector {
   //  SPATIAL NEIGHBORS
   // =====================
 
-  /**
-   * Find cells that are visually adjacent to the given cell (by bounding rect).
-   * Two cells are neighbors if they share an edge and overlap on the perpendicular axis.
-   * Only returns neighbors that share a common parent split (can be merged via BSP operations).
-   */
   private findSpatialNeighbors(page: Page, cellId: string): {
     up: string | null; down: string | null; left: string | null; right: string | null;
   } {
@@ -700,8 +574,8 @@ export class LayoutDirector {
     if (!cell) return result;
 
     const cellRect = cell.element.getBoundingClientRect();
-    const EDGE_TOLERANCE = 8; // pixels of tolerance for edge alignment
-    const OVERLAP_MIN = 10;   // minimum perpendicular overlap to count as neighbor
+    const EDGE_TOLERANCE = 8;
+    const OVERLAP_MIN = 10;
 
     const leaves = getAllLeaves(page.layout);
     for (const leaf of leaves) {
@@ -709,66 +583,36 @@ export class LayoutDirector {
       const neighbor = this.cellPool?.get(leaf.id);
       if (!neighbor) continue;
 
-      // Only allow merge if the two cells share a common parent split (BSP constraint)
       if (!this.shareParentSplit(page.layout, cellId, leaf.id)) continue;
 
       const nr = neighbor.element.getBoundingClientRect();
-
-      // Horizontal overlap (for up/down neighbors)
       const hOverlap = Math.min(cellRect.right, nr.right) - Math.max(cellRect.left, nr.left);
-      // Vertical overlap (for left/right neighbors)
       const vOverlap = Math.min(cellRect.bottom, nr.bottom) - Math.max(cellRect.top, nr.top);
 
-      // Check UP: neighbor's bottom edge touches our top edge
-      if (hOverlap > OVERLAP_MIN && Math.abs(nr.bottom - cellRect.top) < EDGE_TOLERANCE) {
-        result.up = leaf.id;
-      }
-      // Check DOWN: neighbor's top edge touches our bottom edge
-      if (hOverlap > OVERLAP_MIN && Math.abs(nr.top - cellRect.bottom) < EDGE_TOLERANCE) {
-        result.down = leaf.id;
-      }
-      // Check LEFT: neighbor's right edge touches our left edge
-      if (vOverlap > OVERLAP_MIN && Math.abs(nr.right - cellRect.left) < EDGE_TOLERANCE) {
-        result.left = leaf.id;
-      }
-      // Check RIGHT: neighbor's left edge touches our right edge
-      if (vOverlap > OVERLAP_MIN && Math.abs(nr.left - cellRect.right) < EDGE_TOLERANCE) {
-        result.right = leaf.id;
-      }
+      if (hOverlap > OVERLAP_MIN && Math.abs(nr.bottom - cellRect.top) < EDGE_TOLERANCE) result.up = leaf.id;
+      if (hOverlap > OVERLAP_MIN && Math.abs(nr.top - cellRect.bottom) < EDGE_TOLERANCE) result.down = leaf.id;
+      if (vOverlap > OVERLAP_MIN && Math.abs(nr.right - cellRect.left) < EDGE_TOLERANCE) result.left = leaf.id;
+      if (vOverlap > OVERLAP_MIN && Math.abs(nr.left - cellRect.right) < EDGE_TOLERANCE) result.right = leaf.id;
     }
 
     return result;
   }
 
-  /**
-   * Check if two cells share a common parent split node (i.e., they are siblings
-   * or one is a direct descendant of the other's sibling subtree).
-   * This means collapsing their common ancestor split will merge them.
-   */
   private shareParentSplit(root: LayoutNode, cellA: string, cellB: string): boolean {
-    // Find the lowest common ancestor split
     const lca = this.findLCA(root, cellA, cellB);
     return lca !== null && lca.type === 'split';
   }
 
   private findLCA(node: LayoutNode, a: string, b: string): LayoutNode | null {
     if (node.type === 'leaf') return node.id === a || node.id === b ? node : null;
-
     const inFirst = findNode(node.first, a) !== null;
     const inSecond = findNode(node.second, b) !== null;
-
-    // Both in different subtrees → this split is the LCA
     if (inFirst && inSecond) return node;
-
-    // Also check swapped
     const inFirstB = findNode(node.first, b) !== null;
     const inSecondA = findNode(node.second, a) !== null;
     if (inSecondA && inFirstB) return node;
-
-    // Both in same subtree → recurse
     if (inFirst || inFirstB) return this.findLCA(node.first, a, b);
     if (inSecond || inSecondA) return this.findLCA(node.second, a, b);
-
     return null;
   }
 
@@ -776,52 +620,37 @@ export class LayoutDirector {
   //  SPATIAL MERGE
   // =====================
 
-  /**
-   * Merge two cells that are spatial neighbors. Finds their lowest common ancestor
-   * split and collapses it, concatenating content in reading order.
-   */
   private spatialMerge(cellIdA: string, cellIdB: string): void {
     if (!this.cellPool || !this.reconciler) return;
 
     const page = getPageForCell(this.pages, cellIdA);
     if (!page) return;
 
-    // Find the LCA split
     const lca = this.findLCA(page.layout, cellIdA, cellIdB);
     if (!lca || lca.type !== 'split') return;
 
-    // Collect all content from both subtrees in reading order
     const firstLeaves = getAllLeaves(lca.first);
     const secondLeaves = getAllLeaves(lca.second);
     const allContent: Block[] = [];
 
     for (const leaf of [...firstLeaves, ...secondLeaves]) {
       const cell = this.cellPool.get(leaf.id);
-      if (cell) {
-        allContent.push(...cell.drainAll());
-      }
+      if (cell) allContent.push(...cell.drainAll());
     }
 
-    // Collapse the LCA split into a single leaf
     this.updatePageLayout(page.id, mergeCells(page.layout, lca.id));
-
-    // Reconcile DOM
     this.reconciler.reconcilePages(this.container!, this.pages);
 
-    // Find the merged cell and populate it
     const mergedLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
-    // The merged leaf replaces the LCA — find it
-    const mergedCell = this.cellPool.get(mergedLeaves.find(l => {
-      // After merge, the LCA becomes a leaf. Find the leaf that now occupies LCA's space.
-      return this.cellPool!.get(l.id) !== undefined;
-    })?.id ?? '');
+    const mergedCell = this.cellPool.get(mergedLeaves.find(l =>
+      this.cellPool!.get(l.id) !== undefined
+    )?.id ?? '');
 
     if (mergedCell && allContent.length > 0) {
       mergedCell.appendBlocks(allContent);
     }
 
     this.activeCellId = mergedCell?.id ?? null;
-    this.focusedBlockId = null;
     this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
@@ -830,10 +659,6 @@ export class LayoutDirector {
   //  DELETE CELL
   // =====================
 
-  /**
-   * Delete a cell by collapsing its parent split. The sibling expands to fill the space.
-   * Content from the deleted cell is discarded (for empty cells) or moved to sibling.
-   */
   deleteCell(cellId: string): void {
     if (!this.cellPool || !this.reconciler) return;
 
@@ -843,28 +668,20 @@ export class LayoutDirector {
     const parent = findParent(page.layout, cellId);
     if (!parent) return;
 
-    // Determine which child is being deleted and which survives
     const isFirst = findNode(parent.first, cellId) !== null;
     const survivorSubtree = isFirst ? parent.second : parent.first;
     const deletedSubtree = isFirst ? parent.first : parent.second;
 
-    // Drain content from deleted subtree leaves
     const deletedLeaves = getAllLeaves(deletedSubtree);
     const deletedContent: Block[] = [];
     for (const leaf of deletedLeaves) {
       const cell = this.cellPool.get(leaf.id);
-      if (cell) {
-        deletedContent.push(...cell.drainAll());
-      }
+      if (cell) deletedContent.push(...cell.drainAll());
     }
 
-    // Collapse: replace parent split with survivor subtree
     this.updatePageLayout(page.id, mergeCells(page.layout, parent.id));
-
-    // Reconcile DOM
     this.reconciler.reconcilePages(this.container!, this.pages);
 
-    // If deleted cell had content, append it to the first leaf of the survivor
     if (deletedContent.length > 0) {
       const survivorLeaves = getAllLeaves(
         findNode(this.pages.find(p => p.id === page.id)!.layout, survivorSubtree.id)
@@ -873,16 +690,12 @@ export class LayoutDirector {
       const firstSurvivor = survivorLeaves[0];
       if (firstSurvivor) {
         const survivorCell = this.cellPool.get(firstSurvivor.id);
-        if (survivorCell) {
-          survivorCell.appendBlocks(deletedContent);
-        }
+        survivorCell?.appendBlocks(deletedContent);
       }
     }
 
-    // Update active cell to survivor
     const remainingLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
     this.activeCellId = remainingLeaves[0]?.id ?? null;
-    this.focusedBlockId = null;
     this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
@@ -902,7 +715,6 @@ export class LayoutDirector {
     if (this.activeCellId && this.activeCellId !== cellId) {
       const prevCell = this.cellPool?.get(this.activeCellId);
       prevCell?.setActive(false);
-      this.focusedBlockId = null;
     }
 
     this.activeCellId = cellId;
@@ -912,52 +724,10 @@ export class LayoutDirector {
     cell?.setActive(true);
   }
 
-  /**
-   * Ensure a cell has at least one editable block and focus it.
-   * This is a LOCAL operation — no global render, no sync race conditions.
-   */
-  private autoFocusInCell(cellId: string): void {
-    const cell = this.cellPool?.get(cellId);
-    if (!cell) return;
-
-    if (cell.isEmpty()) {
-      const newBlock = cell.ensureEditable();
-      this.focusedBlockId = newBlock.id;
-
-      // Update tree for serialization
-      const page = getPageForCell(this.pages, cellId);
-      if (page) {
-        const blockData: Block = { type: 'paragraph', content: [], id: newBlock.id };
-        this.updatePageLayout(page.id, insertBlockInCell(page.layout, cellId, blockData));
-      }
-
-      requestAnimationFrame(() => {
-        if (newBlock.kernel) {
-          newBlock.kernel.focus();
-        }
-      });
-      return;
-    }
-
-    // Focus the last editable block
-    const focused = cell.focusLastEditable();
-    if (focused) {
-      this.focusedBlockId = focused.id;
-    } else if (cell.blockCount() > 0) {
-      this.focusedBlockId = cell.getBlockNodes()[0].id;
-    }
-  }
-
   private getActiveKernel(): ITextKernel | null {
-    if (!this.focusedBlockId || !this.cellPool) return null;
-    const registry = this.cellPool.getRegistry();
-    const node = registry.get(this.focusedBlockId);
-    return node?.kernel ?? null;
-  }
-
-  private getFocusedBlockNode(): BlockNode | null {
-    if (!this.focusedBlockId || !this.cellPool) return null;
-    return this.cellPool.getRegistry().get(this.focusedBlockId) ?? null;
+    if (!this.activeCellId || !this.cellPool) return null;
+    const cell = this.cellPool.get(this.activeCellId);
+    return cell?.getKernel() ?? null;
   }
 
   private updatePageLayout(pageId: string, newLayout: LayoutNode): void {
@@ -965,7 +735,6 @@ export class LayoutDirector {
       p.id === pageId ? { ...p, layout: newLayout } : p
     );
   }
-
 
   private emitToolbarUpdate(): void {
     for (const cb of this.onToolbarUpdateCallbacks) cb();
@@ -977,11 +746,6 @@ export class LayoutDirector {
 
   private overflowCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /**
-   * Check if a cell is the last cell on the last page and overflows.
-   * If so, distribute overflow content across new pages.
-   * Debounced to let ProseMirror finish processing paste.
-   */
   private checkLastCellOverflow(cellId: string): void {
     if (this.overflowCheckTimer) clearTimeout(this.overflowCheckTimer);
     this.overflowCheckTimer = setTimeout(() => {
@@ -990,9 +754,9 @@ export class LayoutDirector {
   }
 
   /**
-   * One-shot overflow distribution: if the last cell on the last page
-   * overflows, trim excess blocks and create new pages to hold them.
-   * After this, content is fully manual — no ongoing monitoring.
+   * Overflow distribution using PM doc splitting.
+   * No normalizeBlocks, no block-level measurement, no safety margins.
+   * PM's coordsAtPos gives pixel-accurate split positions.
    */
   private distributeOverflowToPages(cellId: string): void {
     if (!this.cellPool || !this.reconciler || !this.container) return;
@@ -1003,57 +767,25 @@ export class LayoutDirector {
 
     const lastPageLeaves = getAllLeaves(lastPage.layout);
     const lastCellId = lastPageLeaves[lastPageLeaves.length - 1]?.id;
-    console.log(`[PageOverflow] check: cellId=${cellId.slice(0,8)}, lastCellId=${lastCellId?.slice(0,8)}, match=${cellId === lastCellId}`);
     if (cellId !== lastCellId) return;
 
     const cell = this.cellPool.get(cellId);
     if (!cell) return;
 
-    // Reset scroll before measuring — after paste, ProseMirror scrolls to cursor
-    // which shifts getBoundingClientRect() positions and breaks findBreakPoint.
+    // Reset scroll before measuring
     cell.contentElement.scrollTop = 0;
 
-    // Normalize: split multi-paragraph ProseMirror editors into individual blocks.
-    // Paste creates ONE PM editor with N paragraphs — we need N separate blocks
-    // so findBreakPoint can measure which ones fit on the page.
-    const didNormalize = cell.normalizeBlocks();
-    console.log(`[PageOverflow] cell ${cellId.slice(0,8)}: ${cell.blockCount()} blocks, normalized=${didNormalize}`);
+    if (!cell.hasOverflow()) return;
 
-    const measurable = {
-      cellId: cell.id,
-      contentElement: cell.contentElement,
-      blockNodes: cell.getBlockNodes(),
-    };
-
-    const sh = cell.contentElement.scrollHeight;
-    const ch = cell.contentElement.clientHeight;
-    console.log(`[PageOverflow] scrollHeight=${sh}, clientHeight=${ch}, overflow=${sh > ch + 1}`);
-
-    if (!this.overflowDetector.hasOverflow(measurable)) return;
-
-    // Find what fits
-    const info = this.overflowDetector.findBreakPoint(measurable);
-    console.log(`[PageOverflow] findBreakPoint: hasOverflow=${info.hasOverflow}, lastFitting=${info.lastFittingBlockIndex}, totalBlocks=${cell.blockCount()}`);
-    if (!info.hasOverflow) return;
-
-    // Subtract 1 block from the fit count as margin buffer.
-    // This prevents sub-pixel margin overflow that causes tiny scrollbars.
-    const rawFit = info.lastFittingBlockIndex + 1;
-    const fitCount = Math.max(1, rawFit > 1 ? rawFit - 1 : rawFit);
-    if (fitCount >= cell.blockCount()) return; // everything fits
-
-    // Trim overflow blocks from this cell
-    const overflowBlocks = cell.trimFrom(fitCount);
-    console.log(`[PageOverflow] trimmed: kept=${fitCount}, overflow=${overflowBlocks.length}`);
+    // Split the PM document at the cell's visible height
+    const maxHeight = cell.contentElement.clientHeight;
+    const overflowBlocks = cell.splitOverflow(maxHeight);
     if (overflowBlocks.length === 0) return;
 
     // Create new pages with overflow content
-    // Each page gets a full-page cell. Fill pages until all content is placed.
     let remaining = overflowBlocks;
 
     while (remaining.length > 0) {
-      console.log(`[PageOverflow] creating page with ${remaining.length} blocks`);
-      // Create a new page
       const newPage = createPage(remaining);
       this.pages = addPageAfter(this.pages, this.pages[this.pages.length - 1].id, newPage);
 
@@ -1065,27 +797,14 @@ export class LayoutDirector {
       const newCell = this.cellPool.get(newPageLeaves[0]?.id ?? '');
       if (!newCell) break;
 
-      // Reset scroll before measuring new page too
       newCell.contentElement.scrollTop = 0;
 
-      const newMeasurable = {
-        cellId: newCell.id,
-        contentElement: newCell.contentElement,
-        blockNodes: newCell.getBlockNodes(),
-      };
+      if (!newCell.hasOverflow()) break;
 
-      if (!this.overflowDetector.hasOverflow(newMeasurable)) {
-        break; // everything fits on this page
-      }
-
-      // Still overflows — trim and continue to next page
-      const newInfo = this.overflowDetector.findBreakPoint(newMeasurable);
-      const newRawFit = newInfo.lastFittingBlockIndex + 1;
-      const newFitCount = Math.max(1, newRawFit > 1 ? newRawFit - 1 : newRawFit);
-
-      if (newFitCount >= newCell.blockCount()) break;
-
-      remaining = newCell.trimFrom(newFitCount);
+      // Still overflows — split again
+      const newMaxHeight = newCell.contentElement.clientHeight;
+      remaining = newCell.splitOverflow(newMaxHeight);
+      if (remaining.length === 0) break;
     }
 
     this.navigationController?.rebuildSequence(this.pages);
@@ -1099,9 +818,6 @@ export class LayoutDirector {
     }, this.config.debounceMs);
   }
 
-  /**
-   * Rebuild DocumentTree from all live cells and emit onChange.
-   */
   private syncToReact(): void {
     if (!this.cellPool) return;
 

@@ -1,9 +1,12 @@
 // ============================================================================
-// TextKernel — ProseMirror wrapper for text-editable blocks
+// TextKernel — ProseMirror wrapper for cell-level text editing
 //
-// Mounts a ProseMirror editor inside a block's content element.
-// Handles text input, cursor, selection, inline formatting, and undo/redo.
-// Block-level concerns (positioning, drag, resize) are NOT handled here.
+// Mounts a SINGLE ProseMirror editor per cell. The PM document contains all
+// blocks (paragraphs, headings, code blocks) for that cell. PM handles
+// navigation, Enter, paste, undo/redo natively within the cell.
+//
+// Cross-cell navigation is detected by checking if PM failed to move the
+// cursor (position unchanged after PM processed the key).
 // ============================================================================
 
 import { EditorState, type Transaction } from 'prosemirror-state';
@@ -16,9 +19,13 @@ import { baseKeymap, toggleMark } from 'prosemirror-commands';
 import { history, undo, redo } from 'prosemirror-history';
 import { inputRules, wrappingInputRule, textblockTypeInputRule } from 'prosemirror-inputrules';
 
-import type { Block, InlineContent, TextMark, ParagraphBlock, HeadingBlock, CodeBlock } from '../model/DocumentTree';
+import type {
+  Block, InlineContent, TextMark,
+  ParagraphBlock, HeadingBlock, CodeBlock,
+} from '../model/DocumentTree';
 import type { ITextKernel, NavigationHandler } from './types';
 import { TextSelection } from 'prosemirror-state';
+import { generateBlockId } from './BlockId';
 
 // --- Schema ---
 
@@ -29,7 +36,8 @@ function buildSchema(): Schema {
 
   // Override paragraph node to support alignment
   nodes = nodes.update('paragraph', {
-    ...nodes.get('paragraph')!,
+    content: 'inline*',
+    group: 'block',
     attrs: { align: { default: null } },
     parseDOM: [{
       tag: 'p',
@@ -46,7 +54,8 @@ function buildSchema(): Schema {
 
   // Override heading node to support alignment
   nodes = nodes.update('heading', {
-    ...nodes.get('heading')!,
+    content: 'inline*',
+    group: 'block',
     attrs: {
       level: { default: 1 },
       align: { default: null },
@@ -65,69 +74,67 @@ function buildSchema(): Schema {
     },
   });
 
-  // Extend marks with our custom types
+  // Build marks
   const marks = basicSchema.spec.marks
-    .append({
-      underline: {
-        parseDOM: [{ tag: 'u' }, { style: 'text-decoration=underline' }],
-        toDOM() { return ['u', 0]; },
+    .update('underline', {
+      parseDOM: [{ tag: 'u' }, { style: 'text-decoration=underline' }],
+      toDOM() { return ['u', 0]; },
+    })
+    .update('strikethrough', {
+      parseDOM: [{ tag: 's' }, { tag: 'del' }, { style: 'text-decoration=line-through' }],
+      toDOM() { return ['s', 0]; },
+    })
+    .addToEnd('highlight', {
+      attrs: { color: { default: null } },
+      parseDOM: [{ tag: 'mark', getAttrs(node: HTMLElement) { return { color: node.style.backgroundColor || null }; } }],
+      toDOM(mark: any) {
+        const attrs: Record<string, string> = {};
+        if (mark.attrs.color) attrs.style = `background-color: ${mark.attrs.color}`;
+        return ['mark', attrs, 0];
       },
-      strikethrough: {
-        parseDOM: [{ tag: 's' }, { tag: 'del' }, { style: 'text-decoration=line-through' }],
-        toDOM() { return ['s', 0]; },
+    })
+    .addToEnd('color', {
+      attrs: { color: { default: null } },
+      parseDOM: [{ style: 'color', getAttrs(value: string) { return { color: value }; } }],
+      toDOM(mark: any) {
+        return ['span', { style: `color: ${mark.attrs.color}` }, 0];
       },
-      highlight: {
-        attrs: { color: { default: null } },
-        parseDOM: [{ tag: 'mark', getAttrs(node: HTMLElement) { return { color: node.style.backgroundColor || null }; } }],
-        toDOM(mark: any) {
-          const attrs: Record<string, string> = {};
-          if (mark.attrs.color) attrs.style = `background-color: ${mark.attrs.color}`;
-          return ['mark', attrs, 0];
+    })
+    .addToEnd('fontFamily', {
+      attrs: { family: { default: null } },
+      parseDOM: [{ style: 'font-family', getAttrs(value: string) { return { family: value.replace(/['"]/g, '') }; } }],
+      toDOM(mark: any) {
+        return ['span', { style: `font-family: ${mark.attrs.family}` }, 0];
+      },
+    })
+    .addToEnd('fontSize', {
+      attrs: { size: { default: null } },
+      parseDOM: [{ style: 'font-size', getAttrs(value: string) { return { size: value }; } }],
+      toDOM(mark: any) {
+        return ['span', { style: `font-size: ${mark.attrs.size}` }, 0];
+      },
+    })
+    .addToEnd('superscript', {
+      parseDOM: [{ tag: 'sup' }],
+      toDOM() { return ['sup', 0]; },
+      excludes: 'subscript',
+    })
+    .addToEnd('subscript', {
+      parseDOM: [{ tag: 'sub' }],
+      toDOM() { return ['sub', 0]; },
+      excludes: 'superscript',
+    })
+    .addToEnd('link', {
+      attrs: { href: { default: '' }, title: { default: null } },
+      inclusive: false,
+      parseDOM: [{
+        tag: 'a[href]',
+        getAttrs(node: HTMLElement) {
+          return { href: node.getAttribute('href'), title: node.getAttribute('title') };
         },
-      },
-      color: {
-        attrs: { color: { default: null } },
-        parseDOM: [{ style: 'color', getAttrs(value: string) { return { color: value }; } }],
-        toDOM(mark: any) {
-          return ['span', { style: `color: ${mark.attrs.color}` }, 0];
-        },
-      },
-      fontFamily: {
-        attrs: { family: { default: null } },
-        parseDOM: [{ style: 'font-family', getAttrs(value: string) { return { family: value.replace(/['"]/g, '') }; } }],
-        toDOM(mark: any) {
-          return ['span', { style: `font-family: ${mark.attrs.family}` }, 0];
-        },
-      },
-      fontSize: {
-        attrs: { size: { default: null } },
-        parseDOM: [{ style: 'font-size', getAttrs(value: string) { return { size: value }; } }],
-        toDOM(mark: any) {
-          return ['span', { style: `font-size: ${mark.attrs.size}` }, 0];
-        },
-      },
-      superscript: {
-        parseDOM: [{ tag: 'sup' }],
-        toDOM() { return ['sup', 0]; },
-        excludes: 'subscript',
-      },
-      subscript: {
-        parseDOM: [{ tag: 'sub' }],
-        toDOM() { return ['sub', 0]; },
-        excludes: 'superscript',
-      },
-      link: {
-        attrs: { href: { default: '' }, title: { default: null } },
-        inclusive: false,
-        parseDOM: [{
-          tag: 'a[href]',
-          getAttrs(node: HTMLElement) {
-            return { href: node.getAttribute('href'), title: node.getAttribute('title') };
-          },
-        }],
-        toDOM(mark: any) {
-          return ['a', { href: mark.attrs.href, title: mark.attrs.title, target: '_blank', rel: 'noopener' }, 0];
-        },
+      }],
+      toDOM(mark: any) {
+        return ['a', { href: mark.attrs.href, title: mark.attrs.title, target: '_blank', rel: 'noopener' }, 0];
       },
     });
 
@@ -178,19 +185,15 @@ function buildInputRules(schema: Schema) {
 export class TextKernel implements ITextKernel {
   private view: EditorView;
   private schema: Schema;
-  private block: Block;
   private updateCallbacks: (() => void)[] = [];
   private selectionUpdateCallbacks: (() => void)[] = [];
-  private enterAtEndCallbacks: (() => void)[] = [];
-  private navHandler: NavigationHandler | null = null;
-  /** Stored cursor X for goal-column preservation across block boundaries */
+  /** Stored cursor X for goal-column preservation across cell boundaries */
   lastCursorX: number | null = null;
 
-  constructor(container: HTMLElement, block: Block) {
+  constructor(container: HTMLElement, blocks: Block[]) {
     this.schema = pmSchema;
-    this.block = block;
 
-    const doc = this.blockToDoc(block);
+    const doc = this.blocksToDoc(blocks);
 
     const state = EditorState.create({
       doc,
@@ -199,11 +202,6 @@ export class TextKernel implements ITextKernel {
         history(),
         buildKeymaps(this.schema),
         buildInputRules(this.schema),
-        // Custom ArrowUp/Down handler that lets PM try first, then crosses blocks
-        keymap({
-          'ArrowUp': (state, dispatch, view) => this.handleVerticalNav('up', state, dispatch, view),
-          'ArrowDown': (state, dispatch, view) => this.handleVerticalNav('down', state, dispatch, view),
-        }),
         keymap(baseKeymap),
       ],
     });
@@ -215,33 +213,24 @@ export class TextKernel implements ITextKernel {
         const newState = this.view.state.apply(tr);
         this.view.updateState(newState);
 
-        // Preserve ProseMirror's scrollIntoView intent (e.g. after Enter creates a new paragraph).
-        // Without this, the cursor can end up in a paragraph below the cell's visible area.
         if (shouldScroll) {
           this.scrollCursorIntoView();
         }
 
         if (tr.docChanged) {
-          for (const cb of this.updateCallbacks) {
-            cb();
-          }
+          for (const cb of this.updateCallbacks) cb();
         }
 
         if (tr.selectionSet || tr.storedMarksSet || tr.docChanged) {
-          for (const cb of this.selectionUpdateCallbacks) {
-            cb();
-          }
+          for (const cb of this.selectionUpdateCallbacks) cb();
         }
-      },
-      handleDOMEvents: {
-        keydown: (_view: EditorView, event: KeyboardEvent) => {
-          return this.handleHorizontalNav(event);
-        },
       },
     });
   }
 
-  // --- Scroll cursor into view within cell ---
+  // =====================
+  //  SCROLL INTO VIEW
+  // =====================
 
   private scrollCursorIntoView(): void {
     requestAnimationFrame(() => {
@@ -256,97 +245,53 @@ export class TextKernel implements ITextKernel {
             scrollParent.scrollTop -= parentRect.top - coords.top + 10;
           }
         }
-      } catch { /* ignore if view was destroyed */ }
+      } catch { /* view may be destroyed */ }
     });
   }
 
-  // --- Navigation: Vertical (ArrowUp/Down) ---
-  // Strategy: Record cursor position before PM handles the key. If PM doesn't move
-  // the cursor (we're at a boundary), hand off to NavigationController.
-  // This is a PM keymap command, so PM has NOT processed it yet when this runs.
-  // We return false to let PM try; if PM can't move, we act in the next frame.
+  // Cross-cell navigation removed — cell switching is mouse-only.
+  // PM handles all arrow key navigation natively within the cell.
 
-  private handleVerticalNav(
-    direction: 'up' | 'down',
-    state: EditorState,
-    _dispatch: ((tr: Transaction) => void) | undefined,
-    _view: EditorView | undefined,
-  ): boolean {
-    if (!this.navHandler) return false;
+  // =====================
+  //  CONTENT: READ
+  // =====================
 
-    const posBefore = state.selection.from;
+  /** Read all blocks from the PM document. One Block per top-level PM node. */
+  getBlocks(): Block[] {
+    const { doc } = this.view.state;
+    const blocks: Block[] = [];
 
-    // Let ProseMirror handle the key first by returning false.
-    // Then check in the next microtask whether the cursor actually moved.
-    // If it didn't move, we're at a boundary → hand off to NavigationController.
-    requestAnimationFrame(() => {
-      const posAfter = this.view.state.selection.from;
-      if (posAfter === posBefore) {
-        // PM couldn't move — we're at a document boundary
-        // Store cursor X for goal-column preservation in the target block
-        try {
-          this.lastCursorX = this.view.coordsAtPos(posAfter).left;
-        } catch {
-          this.lastCursorX = null;
-        }
-        this.navHandler?.onBoundary(direction);
-      }
+    doc.forEach((node: PmNode, _offset: number) => {
+      const block = this.pmNodeToBlock(node);
+      if (block) blocks.push(block);
     });
 
-    return false; // Always let PM try first
-  }
-
-  // --- Navigation: Horizontal (ArrowLeft/Right) ---
-  // Only intercept at absolute start/end — these are cheap checks with no false positives.
-
-  private handleHorizontalNav(event: KeyboardEvent): boolean {
-    if (!this.navHandler) return false;
-    if (event.shiftKey) return false;
-
-    if (event.key === 'ArrowRight' && this.isCursorAtEnd()) {
-      event.preventDefault();
-      this.navHandler.onBoundary('right');
-      return true;
+    // If PM doc is empty (just one empty paragraph), return one empty paragraph
+    if (blocks.length === 0) {
+      blocks.push({ type: 'paragraph', content: [], id: generateBlockId() });
     }
 
-    if (event.key === 'ArrowLeft' && this.isCursorAtStart()) {
-      event.preventDefault();
-      this.navHandler.onBoundary('left');
-      return true;
-    }
-
-    return false;
+    return blocks;
   }
 
-  // --- ITextKernel Implementation ---
-
+  /** Legacy single-block read — returns first block (backward compat) */
   getContent(): Block {
-    const doc = this.view.state.doc;
-    const inlines = this.docToInlines(doc);
-
-    // Read alignment from first block node
-    const alignment = this.getTextAlign() || undefined;
-
-    // Capture lossless ProseMirror doc JSON for structural operations
-    const pmDocJson = doc.toJSON() as Record<string, unknown>;
-
-    switch (this.block.type) {
-      case 'paragraph':
-        return { ...this.block, content: inlines, alignment, pmDocJson } as ParagraphBlock;
-      case 'heading':
-        return { ...this.block, content: inlines, alignment, pmDocJson } as HeadingBlock;
-      case 'codeBlock': {
-        const text = doc.textContent;
-        return { ...this.block, code: text, pmDocJson } as CodeBlock;
-      }
-      default:
-        return { ...this.block, pmDocJson };
-    }
+    const blocks = this.getBlocks();
+    return blocks[0] ?? { type: 'paragraph', content: [] };
   }
 
-  setContent(block: Block): void {
-    this.block = block;
-    const doc = this.blockToDoc(block);
+  /** Get the height of the PM document (for overflow detection) */
+  getDocHeight(): number {
+    return this.view.dom.scrollHeight;
+  }
+
+  // =====================
+  //  CONTENT: WRITE
+  // =====================
+
+  /** Replace the entire PM document with new blocks */
+  setBlocks(blocks: Block[]): void {
+    const doc = this.blocksToDoc(blocks);
     const state = EditorState.create({
       doc,
       schema: this.schema,
@@ -354,6 +299,88 @@ export class TextKernel implements ITextKernel {
     });
     this.view.updateState(state);
   }
+
+  /** Legacy single-block write (backward compat) */
+  setContent(block: Block): void {
+    this.setBlocks([block]);
+  }
+
+  // =====================
+  //  OVERFLOW SPLIT
+  // =====================
+
+  /**
+   * Split the PM document at the given pixel height.
+   * Finds the last top-level node that fits within maxHeight,
+   * keeps the "before" portion in this editor, and returns the
+   * "after" portion as Block[].
+   *
+   * Returns empty array if everything fits.
+   */
+  splitAt(maxHeight: number): Block[] {
+    const { doc } = this.view.state;
+    const editorTop = this.view.dom.getBoundingClientRect().top;
+
+    // Walk top-level nodes to find the last one that fits
+    let lastFittingEnd = 0;
+    let splitFound = false;
+
+    doc.forEach((node: PmNode, offset: number) => {
+      const endPos = offset + node.nodeSize;
+      try {
+        // Get the bottom coordinate of this node
+        // Use endPos - 1 to get position inside the node (not after it)
+        const coords = this.view.coordsAtPos(Math.min(endPos, doc.content.size));
+        const relativeBottom = coords.bottom - editorTop;
+
+        if (relativeBottom <= maxHeight) {
+          lastFittingEnd = endPos;
+        } else {
+          splitFound = true;
+        }
+      } catch {
+        // If coordsAtPos fails, assume it doesn't fit
+        splitFound = true;
+      }
+    });
+
+    if (!splitFound) return []; // Everything fits
+
+    // Ensure we keep at least one node
+    if (lastFittingEnd === 0) {
+      // Even the first node doesn't fit — keep it anyway and split after it
+      doc.forEach((node: PmNode, offset: number) => {
+        if (lastFittingEnd === 0) {
+          lastFittingEnd = offset + node.nodeSize;
+        }
+      });
+    }
+
+    // Split the PM doc
+    const beforeDoc = doc.cut(0, lastFittingEnd);
+    const afterDoc = doc.cut(lastFittingEnd);
+
+    // Update this editor with the "before" portion
+    const newState = EditorState.create({
+      doc: beforeDoc,
+      schema: this.schema,
+      plugins: this.view.state.plugins,
+    });
+    this.view.updateState(newState);
+
+    // Convert "after" to Block[]
+    const overflowBlocks: Block[] = [];
+    afterDoc.forEach((node: PmNode) => {
+      const block = this.pmNodeToBlock(node);
+      if (block) overflowBlocks.push(block);
+    });
+
+    return overflowBlocks;
+  }
+
+  // =====================
+  //  MARKS & FORMATTING
+  // =====================
 
   toggleMark(markType: string, attrs?: Record<string, unknown>): void {
     const pmMarkName = this.mapMarkName(markType);
@@ -389,48 +416,81 @@ export class TextKernel implements ITextKernel {
     return marks;
   }
 
+  setTextAlign(align: string): void {
+    const state = this.view.state;
+    const { from, to } = state.selection;
+    const tr = state.tr;
+
+    state.doc.nodesBetween(from, to, (node, pos) => {
+      if (node.type === this.schema.nodes.paragraph || node.type === this.schema.nodes.heading) {
+        tr.setNodeMarkup(pos, undefined, { ...node.attrs, align: align || null });
+      }
+    });
+
+    if (tr.docChanged) {
+      this.view.dispatch(tr);
+    }
+  }
+
+  getTextAlign(): string {
+    const state = this.view.state;
+    const { $from } = state.selection;
+    for (let d = $from.depth; d >= 0; d--) {
+      const node = $from.node(d);
+      if (node.type === this.schema.nodes.paragraph || node.type === this.schema.nodes.heading) {
+        return node.attrs.align || 'left';
+      }
+    }
+    return 'left';
+  }
+
+  setFontFamily(family: string): void {
+    const mark = this.schema.marks.fontFamily;
+    if (!mark) return;
+    const { from, to, empty } = this.view.state.selection;
+    if (empty) {
+      this.view.dispatch(this.view.state.tr.addStoredMark(mark.create({ family })));
+    } else {
+      this.view.dispatch(this.view.state.tr.addMark(from, to, mark.create({ family })));
+    }
+  }
+
+  setFontSize(size: string): void {
+    const mark = this.schema.marks.fontSize;
+    if (!mark) return;
+    const { from, to, empty } = this.view.state.selection;
+    if (empty) {
+      this.view.dispatch(this.view.state.tr.addStoredMark(mark.create({ size })));
+    } else {
+      this.view.dispatch(this.view.state.tr.addMark(from, to, mark.create({ size })));
+    }
+  }
+
+  insertLink(href: string, title?: string): void {
+    const mark = this.schema.marks.link;
+    if (!mark) return;
+    const { from, to, empty } = this.view.state.selection;
+    if (empty) return;
+    this.view.dispatch(this.view.state.tr.addMark(from, to, mark.create({ href, title: title || null })));
+  }
+
+  removeLink(): void {
+    const mark = this.schema.marks.link;
+    if (!mark) return;
+    const { from, to } = this.view.state.selection;
+    this.view.dispatch(this.view.state.tr.removeMark(from, to, mark));
+  }
+
+  // =====================
+  //  FOCUS & CURSOR
+  // =====================
+
   focus(): void {
     this.view.focus();
   }
 
   blur(): void {
     (this.view.dom as HTMLElement).blur();
-  }
-
-  undo(): boolean {
-    return undo(this.view.state, this.view.dispatch);
-  }
-
-  redo(): boolean {
-    return redo(this.view.state, this.view.dispatch);
-  }
-
-  onUpdate(callback: () => void): void {
-    this.updateCallbacks.push(callback);
-  }
-
-  onSelectionUpdate(callback: () => void): void {
-    this.selectionUpdateCallbacks.push(callback);
-  }
-
-  onEnterAtEnd(callback: () => void): void {
-    this.enterAtEndCallbacks.push(callback);
-  }
-
-  // --- Navigation Methods ---
-
-  setNavigationHandler(handler: NavigationHandler | null): void {
-    this.navHandler = handler;
-  }
-
-  isCursorAtStart(): boolean {
-    const { selection } = this.view.state;
-    return selection.empty && selection.from <= 1; // pos 0 is before doc, 1 is start of first text
-  }
-
-  isCursorAtEnd(): boolean {
-    const { selection, doc } = this.view.state;
-    return selection.empty && selection.to >= doc.content.size - 1;
   }
 
   focusStart(): void {
@@ -451,23 +511,19 @@ export class TextKernel implements ITextKernel {
   }
 
   /**
-   * Focus the first or last line of this editor, placing the cursor at the
-   * closest horizontal position to `targetX`. This preserves "goal column"
-   * when arrowing between blocks — e.g. if the cursor was at column 5,
-   * it should land near column 5 in the target block, not at position 0.
+   * Focus the first or last line and place cursor at closest position to targetX.
+   * Preserves goal-column when crossing cell boundaries.
    */
   focusLineAtX(line: 'first' | 'last', targetX: number | null): void {
     this.view.focus();
     const { doc } = this.view.state;
 
     if (targetX === null) {
-      // Fallback: no X info, just go to start/end
       if (line === 'first') { this.focusStart(); } else { this.focusEnd(); }
       return;
     }
 
     try {
-      // Get the Y coordinate of the target line
       let lineY: number;
       if (line === 'first') {
         const coords = this.view.coordsAtPos(1);
@@ -478,7 +534,6 @@ export class TextKernel implements ITextKernel {
         lineY = (coords.top + coords.bottom) / 2;
       }
 
-      // Use posAtCoords to find the closest position at (targetX, lineY)
       const posInfo = this.view.posAtCoords({ left: targetX, top: lineY });
       if (posInfo) {
         const tr = this.view.state.tr.setSelection(
@@ -486,7 +541,6 @@ export class TextKernel implements ITextKernel {
         );
         this.view.dispatch(tr);
       } else {
-        // Fallback
         if (line === 'first') { this.focusStart(); } else { this.focusEnd(); }
       }
     } catch {
@@ -503,151 +557,227 @@ export class TextKernel implements ITextKernel {
     this.view.dispatch(tr);
   }
 
-  destroy(): void {
-    this.navHandler = null;
-    this.view.destroy();
-    this.updateCallbacks = [];
-    this.selectionUpdateCallbacks = [];
-    this.enterAtEndCallbacks = [];
+  // =====================
+  //  BOUNDARY CHECKS
+  // =====================
+
+  isCursorAtStart(): boolean {
+    const { selection } = this.view.state;
+    return selection.empty && selection.from <= 1;
   }
 
-  // --- Phase 6: Text Alignment ---
-
-  setTextAlign(align: string): void {
-    const state = this.view.state;
-    const { from, to } = state.selection;
-    const tr = state.tr;
-
-    state.doc.nodesBetween(from, to, (node, pos) => {
-      if (node.type === this.schema.nodes.paragraph || node.type === this.schema.nodes.heading) {
-        tr.setNodeMarkup(pos, undefined, { ...node.attrs, align: align || null });
-      }
-    });
-
-    if (tr.docChanged) {
-      this.view.dispatch(tr);
-    }
+  isCursorAtEnd(): boolean {
+    const { selection, doc } = this.view.state;
+    return selection.empty && selection.to >= doc.content.size - 1;
   }
 
-  getTextAlign(): string {
-    const state = this.view.state;
-    const { $from } = state.selection;
-    // Walk up to find the nearest block node
-    for (let d = $from.depth; d >= 0; d--) {
-      const node = $from.node(d);
-      if (node.type === this.schema.nodes.paragraph || node.type === this.schema.nodes.heading) {
-        return node.attrs.align || 'left';
-      }
-    }
-    return 'left';
+  // =====================
+  //  UNDO / REDO
+  // =====================
+
+  undo(): boolean {
+    return undo(this.view.state, this.view.dispatch);
   }
 
-  // --- Phase 6: Font Family & Size ---
-
-  setFontFamily(family: string): void {
-    const mark = this.schema.marks.fontFamily;
-    if (!mark) return;
-
-    const { from, to, empty } = this.view.state.selection;
-    if (empty) {
-      // Store mark for next typed text
-      const storedMark = mark.create({ family });
-      this.view.dispatch(this.view.state.tr.addStoredMark(storedMark));
-    } else {
-      this.view.dispatch(
-        this.view.state.tr.addMark(from, to, mark.create({ family }))
-      );
-    }
+  redo(): boolean {
+    return redo(this.view.state, this.view.dispatch);
   }
 
-  setFontSize(size: string): void {
-    const mark = this.schema.marks.fontSize;
-    if (!mark) return;
+  // =====================
+  //  CALLBACKS
+  // =====================
 
-    const { from, to, empty } = this.view.state.selection;
-    if (empty) {
-      const storedMark = mark.create({ size });
-      this.view.dispatch(this.view.state.tr.addStoredMark(storedMark));
-    } else {
-      this.view.dispatch(
-        this.view.state.tr.addMark(from, to, mark.create({ size }))
-      );
-    }
+  onUpdate(callback: () => void): void {
+    this.updateCallbacks.push(callback);
   }
 
-  // --- Phase 6: Links ---
-
-  insertLink(href: string, title?: string): void {
-    const mark = this.schema.marks.link;
-    if (!mark) return;
-
-    const { from, to, empty } = this.view.state.selection;
-    if (empty) return; // need selected text to create link
-
-    this.view.dispatch(
-      this.view.state.tr.addMark(from, to, mark.create({ href, title: title || null }))
-    );
+  onSelectionUpdate(callback: () => void): void {
+    this.selectionUpdateCallbacks.push(callback);
   }
 
-  removeLink(): void {
-    const mark = this.schema.marks.link;
-    if (!mark) return;
-
-    const { from, to } = this.view.state.selection;
-    this.view.dispatch(this.view.state.tr.removeMark(from, to, mark));
+  setNavigationHandler(_handler: NavigationHandler | null): void {
+    // Navigation is mouse-only — handler stored but not used for arrow keys
   }
 
   getView(): EditorView {
     return this.view;
   }
 
-  // --- Conversion Helpers ---
+  // =====================
+  //  BLOCK TYPE OPERATIONS
+  // =====================
 
-  private blockToDoc(block: Block): any {
-    // If we have a lossless ProseMirror doc snapshot, use it directly
-    if (block.pmDocJson) {
-      try {
-        return PmNode.fromJSON(this.schema, block.pmDocJson);
-      } catch {
-        // Fall through to legacy conversion if JSON is incompatible
+  /** Get the type of the block at the current cursor position */
+  getCurrentBlockType(): { type: string; level?: number } | null {
+    const { $from } = this.view.state.selection;
+    for (let d = $from.depth; d >= 0; d--) {
+      const node = $from.node(d);
+      if (node.type === this.schema.nodes.heading) {
+        return { type: 'heading', level: node.attrs.level };
+      }
+      if (node.type === this.schema.nodes.paragraph) {
+        return { type: 'paragraph' };
+      }
+      if (node.type === this.schema.nodes.code_block) {
+        return { type: 'codeBlock' };
       }
     }
+    return null;
+  }
 
+  /** Change the block type at the current cursor (paragraph ↔ heading) */
+  setBlockType(type: string): void {
+    const { $from } = this.view.state.selection;
+    const pos = $from.before($from.depth);
+
+    if (type === 'paragraph') {
+      const tr = this.view.state.tr.setNodeMarkup(pos, this.schema.nodes.paragraph, { align: null });
+      this.view.dispatch(tr);
+    } else if (type.startsWith('heading:')) {
+      const level = parseInt(type.split(':')[1]);
+      const tr = this.view.state.tr.setNodeMarkup(pos, this.schema.nodes.heading, { level, align: null });
+      this.view.dispatch(tr);
+    }
+  }
+
+  // =====================
+  //  LIFECYCLE
+  // =====================
+
+  destroy(): void {
+    this.view.destroy();
+    this.updateCallbacks = [];
+    this.selectionUpdateCallbacks = [];
+  }
+
+  // =====================
+  //  CONVERSION: Blocks → PM Doc
+  // =====================
+
+  /** Convert Block[] to a single PM document */
+  private blocksToDoc(blocks: Block[]): PmNode {
+    if (blocks.length === 0) {
+      return this.htmlToDoc('<p></p>');
+    }
+
+    // Build HTML for all blocks, then parse into one PM doc
+    const htmlParts: string[] = [];
+
+    for (const block of blocks) {
+      htmlParts.push(this.blockToHtml(block));
+    }
+
+    return this.htmlToDoc(htmlParts.join(''));
+  }
+
+  /** Convert a single Block to HTML string */
+  private blockToHtml(block: Block): string {
+    // If we have a lossless ProseMirror doc snapshot, convert it via PM
+    // (only for single-block compat — multi-block uses the HTML path)
     switch (block.type) {
       case 'paragraph': {
         const alignStyle = block.alignment ? ` style="text-align:${block.alignment}"` : '';
-        // Split content on breaks to create separate <p> tags (preserves empty lines)
         const paragraphs = this.splitOnBreaks(block.content);
-        const html = paragraphs
+        return paragraphs
           .map(p => `<p${alignStyle}>${this.inlinesToHtml(p)}</p>`)
           .join('');
-        return this.htmlToDoc(html || `<p${alignStyle}></p>`);
       }
       case 'heading': {
         const alignStyle = block.alignment ? ` style="text-align:${block.alignment}"` : '';
-        // For headings, first paragraph is the heading, rest become <p> tags
         const paragraphs = this.splitOnBreaks(block.content);
         const firstPara = paragraphs[0] ?? [];
         let html = `<h${block.level}${alignStyle}>${this.inlinesToHtml(firstPara)}</h${block.level}>`;
         for (let i = 1; i < paragraphs.length; i++) {
           html += `<p${alignStyle}>${this.inlinesToHtml(paragraphs[i])}</p>`;
         }
-        return this.htmlToDoc(html);
+        return html;
       }
-      case 'codeBlock': {
-        return this.htmlToDoc(`<pre><code>${this.escapeHtml(block.code)}</code></pre>`);
-      }
+      case 'codeBlock':
+        return `<pre><code>${this.escapeHtml(block.code)}</code></pre>`;
+      case 'divider':
+        return '<hr>';
+      case 'image':
+        return `<p><img src="${this.escapeHtml(block.src)}" alt="${this.escapeHtml(block.alt ?? '')}"></p>`;
       default:
-        return this.htmlToDoc('<p></p>');
+        return '<p></p>';
     }
   }
 
-  /** Split InlineContent[] on break elements into separate paragraph groups */
+  // =====================
+  //  CONVERSION: PM Doc → Blocks
+  // =====================
+
+  /** Convert a top-level PM node to a Block */
+  private pmNodeToBlock(node: PmNode): Block | null {
+    const id = generateBlockId();
+
+    if (node.type === this.schema.nodes.paragraph) {
+      const inlines = this.nodeToInlines(node);
+      const align = node.attrs.align || undefined;
+      return { type: 'paragraph', content: inlines, alignment: align, id } as ParagraphBlock;
+    }
+
+    if (node.type === this.schema.nodes.heading) {
+      const inlines = this.nodeToInlines(node);
+      const align = node.attrs.align || undefined;
+      const level = node.attrs.level as 1 | 2 | 3 | 4 | 5 | 6;
+      return { type: 'heading', level, content: inlines, alignment: align, id } as HeadingBlock;
+    }
+
+    if (node.type === this.schema.nodes.code_block) {
+      return { type: 'codeBlock', code: node.textContent, id } as CodeBlock;
+    }
+
+    if (node.type === this.schema.nodes.horizontal_rule) {
+      return { type: 'divider', id };
+    }
+
+    // Fallback: convert to paragraph
+    const inlines = this.nodeToInlines(node);
+    return { type: 'paragraph', content: inlines, id };
+  }
+
+  /** Extract InlineContent[] from a single PM block node */
+  private nodeToInlines(blockNode: PmNode): InlineContent[] {
+    const inlines: InlineContent[] = [];
+
+    if (blockNode.content.size === 0) return inlines;
+
+    blockNode.forEach((inlineNode: PmNode) => {
+      if (inlineNode.isText) {
+        const marks: TextMark[] = [];
+        for (const mark of inlineNode.marks) {
+          const mapped = this.mapPmMarkToTextMark(mark);
+          if (mapped) marks.push(mapped);
+        }
+        inlines.push({
+          type: 'text',
+          text: inlineNode.text!,
+          marks: marks.length > 0 ? marks : undefined,
+        });
+      } else if (inlineNode.type.name === 'hard_break') {
+        inlines.push({ type: 'break' });
+      } else if (inlineNode.type.name === 'image') {
+        inlines.push({
+          type: 'image',
+          src: inlineNode.attrs.src ?? '',
+          alt: inlineNode.attrs.alt ?? '',
+        });
+      }
+    });
+
+    return inlines;
+  }
+
+  // =====================
+  //  HTML HELPERS
+  // =====================
+
   private splitOnBreaks(content: InlineContent[]): InlineContent[][] {
     const result: InlineContent[][] = [[]];
     for (const inline of content) {
       if (inline.type === 'break') {
-        result.push([]); // Start new paragraph
+        result.push([]);
       } else {
         result[result.length - 1].push(inline);
       }
@@ -655,85 +785,10 @@ export class TextKernel implements ITextKernel {
     return result;
   }
 
-  private htmlToDoc(html: string): any {
+  private htmlToDoc(html: string): PmNode {
     const wrapper = document.createElement('div');
     wrapper.innerHTML = html;
     return DOMParser.fromSchema(this.schema).parse(wrapper);
-  }
-
-  private docToInlines(doc: any): InlineContent[] {
-    const inlines: InlineContent[] = [];
-    let isFirstBlock = true;
-
-    // Walk top-level block nodes (paragraphs, headings) to preserve line breaks
-    doc.forEach((blockNode: any) => {
-      // Add a break between paragraphs (not before the first one)
-      if (!isFirstBlock) {
-        inlines.push({ type: 'break' });
-      }
-      isFirstBlock = false;
-
-      // Empty paragraph → just the break above is enough (represents an empty line)
-      if (blockNode.content.size === 0) {
-        return;
-      }
-
-      // Walk inline content within this block node
-      blockNode.forEach((inlineNode: any) => {
-        if (inlineNode.isText) {
-          const marks: TextMark[] = [];
-          for (const mark of inlineNode.marks) {
-            const mapped = this.mapPmMarkToTextMark(mark);
-            if (mapped) marks.push(mapped);
-          }
-          inlines.push({
-            type: 'text',
-            text: inlineNode.text!,
-            marks: marks.length > 0 ? marks : undefined,
-          });
-        } else if (inlineNode.type.name === 'hard_break') {
-          inlines.push({ type: 'break' });
-        }
-      });
-    });
-
-    return inlines;
-  }
-
-  private mapMarkName(markType: string): string {
-    const map: Record<string, string> = {
-      bold: 'strong',
-      italic: 'em',
-      underline: 'underline',
-      strikethrough: 'strikethrough',
-      code: 'code',
-      highlight: 'highlight',
-      color: 'color',
-      fontFamily: 'fontFamily',
-      fontSize: 'fontSize',
-      superscript: 'superscript',
-      subscript: 'subscript',
-      link: 'link',
-    };
-    return map[markType] ?? markType;
-  }
-
-  private mapPmMarkToTextMark(mark: any): TextMark | null {
-    switch (mark.type.name) {
-      case 'strong': return { type: 'bold' };
-      case 'em': return { type: 'italic' };
-      case 'underline': return { type: 'underline' };
-      case 'strikethrough': return { type: 'strikethrough' };
-      case 'code': return { type: 'code' };
-      case 'highlight': return { type: 'highlight', color: mark.attrs.color };
-      case 'color': return { type: 'color', color: mark.attrs.color };
-      case 'fontFamily': return { type: 'fontFamily', family: mark.attrs.family };
-      case 'fontSize': return { type: 'fontSize', size: mark.attrs.size };
-      case 'superscript': return { type: 'superscript' };
-      case 'subscript': return { type: 'subscript' };
-      case 'link': return { type: 'link', href: mark.attrs.href, title: mark.attrs.title };
-      default: return null;
-    }
   }
 
   private inlinesToHtml(inlines: InlineContent[]): string {
@@ -792,10 +847,36 @@ export class TextKernel implements ITextKernel {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
   }
-}
 
-// --- Factory ---
+  // =====================
+  //  MARK MAPPING
+  // =====================
 
-export function createTextKernel(container: HTMLElement, block: Block): TextKernel {
-  return new TextKernel(container, block);
+  private mapMarkName(markType: string): string {
+    const map: Record<string, string> = {
+      bold: 'strong', italic: 'em', underline: 'underline',
+      strikethrough: 'strikethrough', code: 'code', highlight: 'highlight',
+      color: 'color', fontFamily: 'fontFamily', fontSize: 'fontSize',
+      superscript: 'superscript', subscript: 'subscript', link: 'link',
+    };
+    return map[markType] ?? markType;
+  }
+
+  private mapPmMarkToTextMark(mark: any): TextMark | null {
+    switch (mark.type.name) {
+      case 'strong': return { type: 'bold' };
+      case 'em': return { type: 'italic' };
+      case 'underline': return { type: 'underline' };
+      case 'strikethrough': return { type: 'strikethrough' };
+      case 'code': return { type: 'code' };
+      case 'highlight': return { type: 'highlight', color: mark.attrs.color };
+      case 'color': return { type: 'color', color: mark.attrs.color };
+      case 'fontFamily': return { type: 'fontFamily', family: mark.attrs.family };
+      case 'fontSize': return { type: 'fontSize', size: mark.attrs.size };
+      case 'superscript': return { type: 'superscript' };
+      case 'subscript': return { type: 'subscript' };
+      case 'link': return { type: 'link', href: mark.attrs.href, title: mark.attrs.title };
+      default: return null;
+    }
+  }
 }

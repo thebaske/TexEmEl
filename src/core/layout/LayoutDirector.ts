@@ -265,7 +265,12 @@ export class LayoutDirector {
   //  LAYOUT OPERATIONS
   // =====================
 
-  split(direction: SplitDirection, cellId?: string, ratio = 0.5, reversed = false): void {
+  /**
+   * Split a cell.
+   * @param splitContent - If true AND direction is horizontal, split the text at the divider.
+   *   Only used by context-menu "Split Horizontal". Edge-drags always pass false.
+   */
+  split(direction: SplitDirection, cellId?: string, ratio = 0.5, reversed = false, splitContent = false): void {
     const targetId = cellId ?? this.activeCellId;
     if (!targetId || !this.reconciler || !this.cellPool) return;
 
@@ -274,7 +279,7 @@ export class LayoutDirector {
 
     // Check if source cell has content (for content-aware horizontal split)
     const sourceCell = this.cellPool.get(targetId);
-    const hasContent = sourceCell && !sourceCell.isEmpty();
+    const hasContent = splitContent && sourceCell && !sourceCell.isEmpty();
 
     // Measure source cell height BEFORE the split (needed for content-aware split)
     const sourceCellHeight = sourceCell?.contentElement.clientHeight ?? 0;
@@ -285,11 +290,10 @@ export class LayoutDirector {
     this.reconciler.reconcilePages(this.container!, this.pages);
 
     // Content-aware horizontal split: move overflow text to the new cell
+    // Only triggered by explicit "Split Horizontal" from context menu, never by edge-drags
     if (hasContent && direction === 'horizontal' && sourceCell) {
-      // Calculate how much height the source cell gets after split
-      const splitHeight = reversed
-        ? sourceCellHeight * (1 - ratio)  // content is second child
-        : sourceCellHeight * ratio;       // content is first child
+      // The content cell's new height after split
+      const splitHeight = sourceCellHeight * ratio;
 
       const overflowBlocks = sourceCell.splitOverflow(splitHeight);
       if (overflowBlocks.length > 0) {
@@ -530,7 +534,7 @@ export class LayoutDirector {
     };
 
     const items: MenuItem[] = [
-      { label: 'Split Horizontal', action: () => this.split('horizontal', cellId) },
+      { label: 'Split Horizontal', action: () => this.split('horizontal', cellId, 0.5, false, true) },
       { label: 'Split Vertical', action: () => this.split('vertical', cellId) },
     ];
 

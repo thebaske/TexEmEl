@@ -119,19 +119,23 @@ export class EdgeSplitManager {
       const direction: SplitDirection = isHorizontal ? 'horizontal' : 'vertical';
 
       if (isHorizontal) {
-        // Calculate where the split line should be based on drag position
+        // relY = where the pointer is relative to the cell (0=top, 1=bottom)
         const relY = (e.clientY - rect.top) / rect.height;
-        ratio = Math.max(0.1, Math.min(0.9, relY));
-        // If dragging from bottom, the content stays on top (ratio is correct)
-        // If dragging from top, the new empty space is on top
         if (this.dragEdge === 'top') {
-          ratio = Math.max(0.1, Math.min(0.9, 1 - relY));
+          // Dragging from top: empty space on top = first child gets relY fraction
+          ratio = Math.max(0.1, Math.min(0.9, relY));
+        } else {
+          // Dragging from bottom: empty space on bottom = first child gets relY fraction
+          ratio = Math.max(0.1, Math.min(0.9, relY));
         }
       } else {
         const relX = (e.clientX - rect.left) / rect.width;
-        ratio = Math.max(0.1, Math.min(0.9, relX));
         if (this.dragEdge === 'left') {
-          ratio = Math.max(0.1, Math.min(0.9, 1 - relX));
+          // Dragging from left: empty space on left = first child gets relX fraction
+          ratio = Math.max(0.1, Math.min(0.9, relX));
+        } else {
+          // Dragging from right: empty space on right = first child gets relX fraction
+          ratio = Math.max(0.1, Math.min(0.9, relX));
         }
       }
 

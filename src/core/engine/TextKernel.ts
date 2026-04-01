@@ -183,6 +183,8 @@ export class TextKernel implements ITextKernel {
   private selectionUpdateCallbacks: (() => void)[] = [];
   private enterAtEndCallbacks: (() => void)[] = [];
   private navHandler: NavigationHandler | null = null;
+  /** Stored cursor X for goal-column preservation across block boundaries */
+  lastCursorX: number | null = null;
 
   constructor(container: HTMLElement, block: Block) {
     this.schema = pmSchema;
@@ -197,6 +199,11 @@ export class TextKernel implements ITextKernel {
         history(),
         buildKeymaps(this.schema),
         buildInputRules(this.schema),
+        // Custom ArrowUp/Down handler that lets PM try first, then crosses blocks
+        keymap({
+          'ArrowUp': (state, dispatch, view) => this.handleVerticalNav('up', state, dispatch, view),
+          'ArrowDown': (state, dispatch, view) => this.handleVerticalNav('down', state, dispatch, view),
+        }),
         keymap(baseKeymap),
       ],
     });
@@ -204,8 +211,15 @@ export class TextKernel implements ITextKernel {
     this.view = new EditorView(container, {
       state,
       dispatchTransaction: (tr: Transaction) => {
+        const shouldScroll = tr.scrolledIntoView;
         const newState = this.view.state.apply(tr);
         this.view.updateState(newState);
+
+        // Preserve ProseMirror's scrollIntoView intent (e.g. after Enter creates a new paragraph).
+        // Without this, the cursor can end up in a paragraph below the cell's visible area.
+        if (shouldScroll) {
+          this.scrollCursorIntoView();
+        }
 
         if (tr.docChanged) {
           for (const cb of this.updateCallbacks) {
@@ -221,56 +235,81 @@ export class TextKernel implements ITextKernel {
       },
       handleDOMEvents: {
         keydown: (_view: EditorView, event: KeyboardEvent) => {
-          return this.handleNavigationKey(event);
+          return this.handleHorizontalNav(event);
         },
       },
     });
   }
 
-  // --- Navigation Key Interception ---
+  // --- Scroll cursor into view within cell ---
 
-  /**
-   * Intercept ONLY arrow keys at boundaries for cross-block navigation.
-   * Returns true if we handled it (prevents PM from handling).
-   * All other keys (typing, Enter, Ctrl+A, etc.) pass through to PM.
-   */
-  private handleNavigationKey(event: KeyboardEvent): boolean {
+  private scrollCursorIntoView(): void {
+    requestAnimationFrame(() => {
+      try {
+        const coords = this.view.coordsAtPos(this.view.state.selection.from);
+        const scrollParent = this.view.dom.closest('.bsp-cell-content');
+        if (scrollParent) {
+          const parentRect = scrollParent.getBoundingClientRect();
+          if (coords.bottom > parentRect.bottom) {
+            scrollParent.scrollTop += coords.bottom - parentRect.bottom + 10;
+          } else if (coords.top < parentRect.top) {
+            scrollParent.scrollTop -= parentRect.top - coords.top + 10;
+          }
+        }
+      } catch { /* ignore if view was destroyed */ }
+    });
+  }
+
+  // --- Navigation: Vertical (ArrowUp/Down) ---
+  // Strategy: Record cursor position before PM handles the key. If PM doesn't move
+  // the cursor (we're at a boundary), hand off to NavigationController.
+  // This is a PM keymap command, so PM has NOT processed it yet when this runs.
+  // We return false to let PM try; if PM can't move, we act in the next frame.
+
+  private handleVerticalNav(
+    direction: 'up' | 'down',
+    state: EditorState,
+    _dispatch: ((tr: Transaction) => void) | undefined,
+    _view: EditorView | undefined,
+  ): boolean {
     if (!this.navHandler) return false;
 
-    const { key, shiftKey } = event;
+    const posBefore = state.selection.from;
 
-    // Only intercept plain arrow keys (no shift = no selection extension)
-    if (shiftKey) return false;
+    // Let ProseMirror handle the key first by returning false.
+    // Then check in the next microtask whether the cursor actually moved.
+    // If it didn't move, we're at a boundary → hand off to NavigationController.
+    requestAnimationFrame(() => {
+      const posAfter = this.view.state.selection.from;
+      if (posAfter === posBefore) {
+        // PM couldn't move — we're at a document boundary
+        // Store cursor X for goal-column preservation in the target block
+        try {
+          this.lastCursorX = this.view.coordsAtPos(posAfter).left;
+        } catch {
+          this.lastCursorX = null;
+        }
+        this.navHandler?.onBoundary(direction);
+      }
+    });
 
-    // Only intercept arrow keys
-    if (key !== 'ArrowDown' && key !== 'ArrowUp' &&
-        key !== 'ArrowRight' && key !== 'ArrowLeft') {
-      return false;
-    }
+    return false; // Always let PM try first
+  }
 
-    // ArrowDown at last line → move to next block
-    if (key === 'ArrowDown' && this.isCursorOnLastLine()) {
-      event.preventDefault();
-      this.navHandler.onBoundary('down');
-      return true;
-    }
+  // --- Navigation: Horizontal (ArrowLeft/Right) ---
+  // Only intercept at absolute start/end — these are cheap checks with no false positives.
 
-    // ArrowUp at first line → move to previous block
-    if (key === 'ArrowUp' && this.isCursorOnFirstLine()) {
-      event.preventDefault();
-      this.navHandler.onBoundary('up');
-      return true;
-    }
+  private handleHorizontalNav(event: KeyboardEvent): boolean {
+    if (!this.navHandler) return false;
+    if (event.shiftKey) return false;
 
-    // ArrowRight at end → move to next block
-    if (key === 'ArrowRight' && this.isCursorAtEnd()) {
+    if (event.key === 'ArrowRight' && this.isCursorAtEnd()) {
       event.preventDefault();
       this.navHandler.onBoundary('right');
       return true;
     }
 
-    // ArrowLeft at start → move to previous block
-    if (key === 'ArrowLeft' && this.isCursorAtStart()) {
+    if (event.key === 'ArrowLeft' && this.isCursorAtStart()) {
       event.preventDefault();
       this.navHandler.onBoundary('left');
       return true;
@@ -394,31 +433,6 @@ export class TextKernel implements ITextKernel {
     return selection.empty && selection.to >= doc.content.size - 1;
   }
 
-  isCursorOnFirstLine(): boolean {
-    const { selection } = this.view.state;
-    if (!selection.empty) return false;
-    try {
-      const cursorCoords = this.view.coordsAtPos(selection.from);
-      const startCoords = this.view.coordsAtPos(1); // start of content
-      return Math.abs(cursorCoords.top - startCoords.top) < 3;
-    } catch {
-      return this.isCursorAtStart();
-    }
-  }
-
-  isCursorOnLastLine(): boolean {
-    const { selection, doc } = this.view.state;
-    if (!selection.empty) return false;
-    try {
-      const cursorCoords = this.view.coordsAtPos(selection.from);
-      const endPos = Math.max(1, doc.content.size - 1);
-      const endCoords = this.view.coordsAtPos(endPos);
-      return Math.abs(cursorCoords.top - endCoords.top) < 3;
-    } catch {
-      return this.isCursorAtEnd();
-    }
-  }
-
   focusStart(): void {
     this.view.focus();
     const tr = this.view.state.tr.setSelection(
@@ -434,6 +448,50 @@ export class TextKernel implements ITextKernel {
       TextSelection.create(this.view.state.doc, endPos)
     );
     this.view.dispatch(tr);
+  }
+
+  /**
+   * Focus the first or last line of this editor, placing the cursor at the
+   * closest horizontal position to `targetX`. This preserves "goal column"
+   * when arrowing between blocks — e.g. if the cursor was at column 5,
+   * it should land near column 5 in the target block, not at position 0.
+   */
+  focusLineAtX(line: 'first' | 'last', targetX: number | null): void {
+    this.view.focus();
+    const { doc } = this.view.state;
+
+    if (targetX === null) {
+      // Fallback: no X info, just go to start/end
+      if (line === 'first') { this.focusStart(); } else { this.focusEnd(); }
+      return;
+    }
+
+    try {
+      // Get the Y coordinate of the target line
+      let lineY: number;
+      if (line === 'first') {
+        const coords = this.view.coordsAtPos(1);
+        lineY = (coords.top + coords.bottom) / 2;
+      } else {
+        const endPos = Math.max(1, doc.content.size - 1);
+        const coords = this.view.coordsAtPos(endPos);
+        lineY = (coords.top + coords.bottom) / 2;
+      }
+
+      // Use posAtCoords to find the closest position at (targetX, lineY)
+      const posInfo = this.view.posAtCoords({ left: targetX, top: lineY });
+      if (posInfo) {
+        const tr = this.view.state.tr.setSelection(
+          TextSelection.create(doc, posInfo.pos)
+        );
+        this.view.dispatch(tr);
+      } else {
+        // Fallback
+        if (line === 'first') { this.focusStart(); } else { this.focusEnd(); }
+      }
+    } catch {
+      if (line === 'first') { this.focusStart(); } else { this.focusEnd(); }
+    }
   }
 
   selectAll(): void {

@@ -102,6 +102,11 @@ export class NavigationController {
     const blockNode = cell?.getBlockNode(target.blockId);
     if (!blockNode?.kernel) return;
 
+    // Read goal-column X from the source block's kernel (set during boundary detection)
+    const sourceCell = this.cellPool.get(this.navSequence[idx].cellId);
+    const sourceBlock = sourceCell?.getBlockNode(this.navSequence[idx].blockId);
+    const goalX = sourceBlock?.kernel?.lastCursorX ?? null;
+
     // Update active cell if crossing cell boundary
     if (target.cellId !== this.navSequence[idx].cellId) {
       this.config.onActiveCellChange?.(target.cellId);
@@ -110,9 +115,11 @@ export class NavigationController {
     this.config.onFocusedBlockChange?.(target.blockId);
 
     if (direction === 'down' || direction === 'right') {
-      blockNode.kernel.focusStart();
+      // Down/Right: land on first line of target, preserving horizontal position
+      blockNode.kernel.focusLineAtX('first', direction === 'down' ? goalX : null);
     } else {
-      blockNode.kernel.focusEnd();
+      // Up/Left: land on last line of target, preserving horizontal position
+      blockNode.kernel.focusLineAtX('last', direction === 'up' ? goalX : null);
     }
   }
 

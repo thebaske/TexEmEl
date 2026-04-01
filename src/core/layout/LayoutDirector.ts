@@ -626,8 +626,25 @@ export class LayoutDirector {
     const page = getPageForCell(this.pages, cellId);
     if (page) {
       const parent = findParent(page.layout, cellId);
+
+      // --- Spatial merge options: find adjacent cells by bounding rect ---
+      const neighbors = this.findSpatialNeighbors(page, cellId);
+      if (neighbors.up) {
+        items.push({ label: 'Merge Up', action: () => this.spatialMerge(cellId, neighbors.up!) });
+      }
+      if (neighbors.down) {
+        items.push({ label: 'Merge Down', action: () => this.spatialMerge(cellId, neighbors.down!) });
+      }
+      if (neighbors.left) {
+        items.push({ label: 'Merge Left', action: () => this.spatialMerge(cellId, neighbors.left!) });
+      }
+      if (neighbors.right) {
+        items.push({ label: 'Merge Right', action: () => this.spatialMerge(cellId, neighbors.right!) });
+      }
+
+      // --- Delete Cell: collapse this cell, sibling expands ---
       if (parent) {
-        items.push({ label: 'Merge with Sibling', action: () => this.merge(cellId) });
+        items.push({ label: 'Delete Cell', action: () => this.deleteCell(cellId) });
       }
     }
 
@@ -663,6 +680,211 @@ export class LayoutDirector {
     requestAnimationFrame(() => {
       document.addEventListener('mousedown', closeHandler);
     });
+  }
+
+  // =====================
+  //  SPATIAL NEIGHBORS
+  // =====================
+
+  /**
+   * Find cells that are visually adjacent to the given cell (by bounding rect).
+   * Two cells are neighbors if they share an edge and overlap on the perpendicular axis.
+   * Only returns neighbors that share a common parent split (can be merged via BSP operations).
+   */
+  private findSpatialNeighbors(page: Page, cellId: string): {
+    up: string | null; down: string | null; left: string | null; right: string | null;
+  } {
+    const result = { up: null as string | null, down: null as string | null, left: null as string | null, right: null as string | null };
+
+    const cell = this.cellPool?.get(cellId);
+    if (!cell) return result;
+
+    const cellRect = cell.element.getBoundingClientRect();
+    const EDGE_TOLERANCE = 8; // pixels of tolerance for edge alignment
+    const OVERLAP_MIN = 10;   // minimum perpendicular overlap to count as neighbor
+
+    const leaves = getAllLeaves(page.layout);
+    for (const leaf of leaves) {
+      if (leaf.id === cellId) continue;
+      const neighbor = this.cellPool?.get(leaf.id);
+      if (!neighbor) continue;
+
+      // Only allow merge if the two cells share a common parent split (BSP constraint)
+      if (!this.shareParentSplit(page.layout, cellId, leaf.id)) continue;
+
+      const nr = neighbor.element.getBoundingClientRect();
+
+      // Horizontal overlap (for up/down neighbors)
+      const hOverlap = Math.min(cellRect.right, nr.right) - Math.max(cellRect.left, nr.left);
+      // Vertical overlap (for left/right neighbors)
+      const vOverlap = Math.min(cellRect.bottom, nr.bottom) - Math.max(cellRect.top, nr.top);
+
+      // Check UP: neighbor's bottom edge touches our top edge
+      if (hOverlap > OVERLAP_MIN && Math.abs(nr.bottom - cellRect.top) < EDGE_TOLERANCE) {
+        result.up = leaf.id;
+      }
+      // Check DOWN: neighbor's top edge touches our bottom edge
+      if (hOverlap > OVERLAP_MIN && Math.abs(nr.top - cellRect.bottom) < EDGE_TOLERANCE) {
+        result.down = leaf.id;
+      }
+      // Check LEFT: neighbor's right edge touches our left edge
+      if (vOverlap > OVERLAP_MIN && Math.abs(nr.right - cellRect.left) < EDGE_TOLERANCE) {
+        result.left = leaf.id;
+      }
+      // Check RIGHT: neighbor's left edge touches our right edge
+      if (vOverlap > OVERLAP_MIN && Math.abs(nr.left - cellRect.right) < EDGE_TOLERANCE) {
+        result.right = leaf.id;
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Check if two cells share a common parent split node (i.e., they are siblings
+   * or one is a direct descendant of the other's sibling subtree).
+   * This means collapsing their common ancestor split will merge them.
+   */
+  private shareParentSplit(root: LayoutNode, cellA: string, cellB: string): boolean {
+    // Find the lowest common ancestor split
+    const lca = this.findLCA(root, cellA, cellB);
+    return lca !== null && lca.type === 'split';
+  }
+
+  private findLCA(node: LayoutNode, a: string, b: string): LayoutNode | null {
+    if (node.type === 'leaf') return node.id === a || node.id === b ? node : null;
+
+    const inFirst = findNode(node.first, a) !== null;
+    const inSecond = findNode(node.second, b) !== null;
+
+    // Both in different subtrees → this split is the LCA
+    if (inFirst && inSecond) return node;
+
+    // Also check swapped
+    const inFirstB = findNode(node.first, b) !== null;
+    const inSecondA = findNode(node.second, a) !== null;
+    if (inSecondA && inFirstB) return node;
+
+    // Both in same subtree → recurse
+    if (inFirst || inFirstB) return this.findLCA(node.first, a, b);
+    if (inSecond || inSecondA) return this.findLCA(node.second, a, b);
+
+    return null;
+  }
+
+  // =====================
+  //  SPATIAL MERGE
+  // =====================
+
+  /**
+   * Merge two cells that are spatial neighbors. Finds their lowest common ancestor
+   * split and collapses it, concatenating content in reading order.
+   */
+  private spatialMerge(cellIdA: string, cellIdB: string): void {
+    if (!this.cellPool || !this.reconciler) return;
+
+    const page = getPageForCell(this.pages, cellIdA);
+    if (!page) return;
+
+    // Find the LCA split
+    const lca = this.findLCA(page.layout, cellIdA, cellIdB);
+    if (!lca || lca.type !== 'split') return;
+
+    // Collect all content from both subtrees in reading order
+    const firstLeaves = getAllLeaves(lca.first);
+    const secondLeaves = getAllLeaves(lca.second);
+    const allContent: Block[] = [];
+
+    for (const leaf of [...firstLeaves, ...secondLeaves]) {
+      const cell = this.cellPool.get(leaf.id);
+      if (cell) {
+        allContent.push(...cell.drainAll());
+      }
+    }
+
+    // Collapse the LCA split into a single leaf
+    this.updatePageLayout(page.id, mergeCells(page.layout, lca.id));
+
+    // Reconcile DOM
+    this.reconciler.reconcilePages(this.container!, this.pages);
+
+    // Find the merged cell and populate it
+    const mergedLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
+    // The merged leaf replaces the LCA — find it
+    const mergedCell = this.cellPool.get(mergedLeaves.find(l => {
+      // After merge, the LCA becomes a leaf. Find the leaf that now occupies LCA's space.
+      return this.cellPool!.get(l.id) !== undefined;
+    })?.id ?? '');
+
+    if (mergedCell && allContent.length > 0) {
+      mergedCell.appendBlocks(allContent);
+    }
+
+    this.activeCellId = mergedCell?.id ?? null;
+    this.focusedBlockId = null;
+    this.navigationController?.rebuildSequence(this.pages);
+    this.syncToReact();
+  }
+
+  // =====================
+  //  DELETE CELL
+  // =====================
+
+  /**
+   * Delete a cell by collapsing its parent split. The sibling expands to fill the space.
+   * Content from the deleted cell is discarded (for empty cells) or moved to sibling.
+   */
+  deleteCell(cellId: string): void {
+    if (!this.cellPool || !this.reconciler) return;
+
+    const page = getPageForCell(this.pages, cellId);
+    if (!page) return;
+
+    const parent = findParent(page.layout, cellId);
+    if (!parent) return;
+
+    // Determine which child is being deleted and which survives
+    const isFirst = findNode(parent.first, cellId) !== null;
+    const survivorSubtree = isFirst ? parent.second : parent.first;
+    const deletedSubtree = isFirst ? parent.first : parent.second;
+
+    // Drain content from deleted subtree leaves
+    const deletedLeaves = getAllLeaves(deletedSubtree);
+    const deletedContent: Block[] = [];
+    for (const leaf of deletedLeaves) {
+      const cell = this.cellPool.get(leaf.id);
+      if (cell) {
+        deletedContent.push(...cell.drainAll());
+      }
+    }
+
+    // Collapse: replace parent split with survivor subtree
+    this.updatePageLayout(page.id, mergeCells(page.layout, parent.id));
+
+    // Reconcile DOM
+    this.reconciler.reconcilePages(this.container!, this.pages);
+
+    // If deleted cell had content, append it to the first leaf of the survivor
+    if (deletedContent.length > 0) {
+      const survivorLeaves = getAllLeaves(
+        findNode(this.pages.find(p => p.id === page.id)!.layout, survivorSubtree.id)
+          ?? this.pages.find(p => p.id === page.id)!.layout
+      );
+      const firstSurvivor = survivorLeaves[0];
+      if (firstSurvivor) {
+        const survivorCell = this.cellPool.get(firstSurvivor.id);
+        if (survivorCell) {
+          survivorCell.appendBlocks(deletedContent);
+        }
+      }
+    }
+
+    // Update active cell to survivor
+    const remainingLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
+    this.activeCellId = remainingLeaves[0]?.id ?? null;
+    this.focusedBlockId = null;
+    this.navigationController?.rebuildSequence(this.pages);
+    this.syncToReact();
   }
 
   private hideContextMenu(): void {

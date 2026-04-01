@@ -154,14 +154,14 @@ export interface ITextKernel {
   isCursorAtStart(): boolean;
   /** Check if cursor is at the very end of the document */
   isCursorAtEnd(): boolean;
-  /** Check if cursor is on the first visual line (for ArrowUp boundary) */
-  isCursorOnFirstLine(): boolean;
-  /** Check if cursor is on the last visual line (for ArrowDown boundary) */
-  isCursorOnLastLine(): boolean;
   /** Place cursor at the start and focus */
   focusStart(): void;
   /** Place cursor at the end and focus */
   focusEnd(): void;
+  /** Focus the first or last line, placing cursor at the closest position to targetX */
+  focusLineAtX(line: 'first' | 'last', targetX: number | null): void;
+  /** Stored cursor X from last boundary crossing (for goal-column preservation) */
+  lastCursorX: number | null;
   /** Select all content in this editor */
   selectAll(): void;
   /** Set the navigation handler for cross-block movement */

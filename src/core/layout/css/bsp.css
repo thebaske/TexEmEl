@@ -203,6 +203,45 @@
   background: var(--bg-tertiary, #f1f5f9);
 }
 
+.bsp-context-menu-separator {
+  height: 1px;
+  background: var(--border, #e2e8f0);
+  margin: 4px 8px;
+}
+
+/* --- Overflow target highlight (shown on hover over overflow menu item) --- */
+.bsp-cell--overflow-target {
+  position: relative;
+  box-shadow: inset 0 0 0 2px var(--accent, #3b82f6) !important;
+}
+
+.bsp-cell--overflow-target::after {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent, #3b82f6);
+  font-size: 11px;
+  text-align: center;
+  padding: 3px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Prepend indicator — arrow at top of target */
+.bsp-cell--overflow-target[data-overflow-position="top"]::after {
+  content: '↓ content will be inserted here';
+  top: 0;
+  border-bottom: 2px solid var(--accent, #3b82f6);
+}
+
+/* Append indicator — arrow at bottom of target */
+.bsp-cell--overflow-target[data-overflow-position="bottom"]::after {
+  content: '↑ content will be inserted here';
+  bottom: 0;
+  border-top: 2px solid var(--accent, #3b82f6);
+}
+
 /* --- Block styles inside cells --- */
 .bsp-cell-content .block {
   position: relative;

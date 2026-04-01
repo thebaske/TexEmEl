@@ -96,6 +96,15 @@ export class CellInstance {
     this.updateEmptyState();
   }
 
+  /** Prepend blocks at the beginning (for overflow — content goes before existing) */
+  prependBlocks(blocks: Block[]): void {
+    if (!this.kernel || blocks.length === 0) return;
+    const current = this.kernel.getBlocks();
+    const filtered = current.length === 1 && this.isEmpty() ? [] : current;
+    this.kernel.setBlocks([...blocks, ...filtered]);
+    this.updateEmptyState();
+  }
+
   /** Append blocks at the end (for merge — absorb sibling's content) */
   appendBlocks(blocks: Block[]): void {
     if (!this.kernel || blocks.length === 0) return;

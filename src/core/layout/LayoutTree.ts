@@ -71,10 +71,20 @@ export function splitCell(
   cellId: string,
   direction: SplitDirection,
   ratio = 0.5,
+  reversed = false,
 ): { tree: LayoutNode; newCellId: string } {
   const newCellId = generateBlockId();
   const tree = mapNode(root, cellId, (leaf) => {
     if (leaf.type !== 'leaf') return leaf;
+    if (reversed) {
+      // New empty cell is FIRST (top/left), original is SECOND (bottom/right)
+      return createSplit(
+        direction,
+        createLeaf([], newCellId),
+        leaf,
+        ratio,
+      );
+    }
     return createSplit(
       direction,
       leaf,                            // ← KEEPS original ID + content

@@ -13,8 +13,9 @@
 import type { SplitDirection } from './LayoutTree';
 
 export interface EdgeSplitCallbacks {
-  /** Called when user drags from a cell edge to create a split */
-  onEdgeSplit: (cellId: string, direction: SplitDirection, ratio: number) => void;
+  /** Called when user drags from a cell edge to create a split.
+   *  reversed=true when dragging from top/left (new space appears on that side). */
+  onEdgeSplit: (cellId: string, direction: SplitDirection, ratio: number, reversed: boolean) => void;
 }
 
 type Edge = 'top' | 'bottom' | 'left' | 'right';
@@ -134,7 +135,8 @@ export class EdgeSplitManager {
         }
       }
 
-      this.callbacks.onEdgeSplit(this.sourceCellId, direction, ratio);
+      const reversed = this.dragEdge === 'top' || this.dragEdge === 'left';
+      this.callbacks.onEdgeSplit(this.sourceCellId, direction, ratio, reversed);
     }
 
     this.endDrag();

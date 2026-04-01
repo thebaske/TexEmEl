@@ -174,8 +174,8 @@ export class LayoutDirector {
 
     // Set up edge split manager
     this.edgeSplitManager = new EdgeSplitManager(container, {
-      onEdgeSplit: (cellId, direction, ratio) => {
-        this.split(direction, cellId, ratio);
+      onEdgeSplit: (cellId, direction, ratio, reversed) => {
+        this.split(direction, cellId, ratio, reversed);
       },
     });
 
@@ -265,17 +265,41 @@ export class LayoutDirector {
   //  LAYOUT OPERATIONS
   // =====================
 
-  split(direction: SplitDirection, cellId?: string, ratio = 0.5): void {
+  split(direction: SplitDirection, cellId?: string, ratio = 0.5, reversed = false): void {
     const targetId = cellId ?? this.activeCellId;
-    if (!targetId || !this.reconciler) return;
+    if (!targetId || !this.reconciler || !this.cellPool) return;
 
     const page = getPageForCell(this.pages, targetId);
     if (!page) return;
 
-    const { tree: newLayout } = splitCell(page.layout, targetId, direction, ratio);
+    // Check if source cell has content (for content-aware horizontal split)
+    const sourceCell = this.cellPool.get(targetId);
+    const hasContent = sourceCell && !sourceCell.isEmpty();
+
+    // Measure source cell height BEFORE the split (needed for content-aware split)
+    const sourceCellHeight = sourceCell?.contentElement.clientHeight ?? 0;
+
+    const { tree: newLayout, newCellId } = splitCell(page.layout, targetId, direction, ratio, reversed);
     this.updatePageLayout(page.id, newLayout);
 
     this.reconciler.reconcilePages(this.container!, this.pages);
+
+    // Content-aware horizontal split: move overflow text to the new cell
+    if (hasContent && direction === 'horizontal' && sourceCell) {
+      // Calculate how much height the source cell gets after split
+      const splitHeight = reversed
+        ? sourceCellHeight * (1 - ratio)  // content is second child
+        : sourceCellHeight * ratio;       // content is first child
+
+      const overflowBlocks = sourceCell.splitOverflow(splitHeight);
+      if (overflowBlocks.length > 0) {
+        const newCell = this.cellPool.get(newCellId);
+        if (newCell) {
+          newCell.setContent(overflowBlocks);
+        }
+      }
+    }
+
     this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }
@@ -497,17 +521,73 @@ export class LayoutDirector {
     menu.style.top = `${y}px`;
     menu.style.zIndex = '10000';
 
-    const items: { label: string; action: () => void }[] = [
+    type MenuItem = {
+      label: string;
+      action: () => void;
+      separator?: boolean;
+      hoverTarget?: string;       // cellId to highlight on hover
+      hoverPosition?: 'top' | 'bottom'; // where the insert indicator shows
+    };
+
+    const items: MenuItem[] = [
       { label: 'Split Horizontal', action: () => this.split('horizontal', cellId) },
       { label: 'Split Vertical', action: () => this.split('vertical', cellId) },
     ];
 
     const page = getPageForCell(this.pages, cellId);
+    const cell = this.cellPool?.get(cellId);
+
     if (page) {
       const parent = findParent(page.layout, cellId);
-
-      // Spatial merge options
       const neighbors = this.findSpatialNeighbors(page, cellId);
+
+      // --- Overflow options (only when cell has overflow) ---
+      if (cell?.hasOverflow()) {
+        items.push({ label: '', action: () => {}, separator: true });
+
+        if (neighbors.right) {
+          items.push({
+            label: 'Overflow → Right',
+            action: () => this.overflowTo(cellId, neighbors.right!, 'right'),
+            hoverTarget: neighbors.right,
+            hoverPosition: 'top',
+          });
+        }
+        if (neighbors.down) {
+          items.push({
+            label: 'Overflow → Down',
+            action: () => this.overflowTo(cellId, neighbors.down!, 'down'),
+            hoverTarget: neighbors.down,
+            hoverPosition: 'top',
+          });
+        }
+        if (neighbors.left) {
+          items.push({
+            label: 'Overflow → Left',
+            action: () => this.overflowTo(cellId, neighbors.left!, 'left'),
+            hoverTarget: neighbors.left,
+            hoverPosition: 'bottom',
+          });
+        }
+        if (neighbors.up) {
+          items.push({
+            label: 'Overflow → Up',
+            action: () => this.overflowTo(cellId, neighbors.up!, 'up'),
+            hoverTarget: neighbors.up,
+            hoverPosition: 'bottom',
+          });
+        }
+
+        items.push({
+          label: 'Overflow → New Pages Below',
+          action: () => this.overflowToNewPages(cellId),
+        });
+      }
+
+      // --- Merge options ---
+      if (neighbors.up || neighbors.down || neighbors.left || neighbors.right) {
+        items.push({ label: '', action: () => {}, separator: true });
+      }
       if (neighbors.up) {
         items.push({ label: 'Merge Up', action: () => this.spatialMerge(cellId, neighbors.up!) });
       }
@@ -521,7 +601,7 @@ export class LayoutDirector {
         items.push({ label: 'Merge Right', action: () => this.spatialMerge(cellId, neighbors.right!) });
       }
 
-      // Delete Cell
+      // --- Delete Cell ---
       if (parent) {
         items.push({ label: 'Delete Cell', action: () => this.deleteCell(cellId) });
       }
@@ -536,14 +616,43 @@ export class LayoutDirector {
       }
     }});
 
+    // --- Render menu items ---
     for (const item of items) {
+      if (item.separator) {
+        const sep = document.createElement('div');
+        sep.classList.add('bsp-context-menu-separator');
+        menu.appendChild(sep);
+        continue;
+      }
+
       const btn = document.createElement('button');
       btn.classList.add('bsp-context-menu-item');
       btn.textContent = item.label;
+
       btn.addEventListener('click', () => {
+        this.clearOverflowHighlight();
         item.action();
         this.hideContextMenu();
       });
+
+      // Hover feedback: highlight target cell
+      if (item.hoverTarget) {
+        const targetId = item.hoverTarget;
+        const position = item.hoverPosition ?? 'top';
+
+        btn.addEventListener('mouseenter', () => {
+          const targetCell = this.cellPool?.get(targetId);
+          if (targetCell) {
+            targetCell.element.classList.add('bsp-cell--overflow-target');
+            targetCell.element.dataset.overflowPosition = position;
+          }
+        });
+
+        btn.addEventListener('mouseleave', () => {
+          this.clearOverflowHighlight();
+        });
+      }
+
       menu.appendChild(btn);
     }
 
@@ -552,12 +661,20 @@ export class LayoutDirector {
 
     const closeHandler = (e: MouseEvent) => {
       if (!menu.contains(e.target as Node)) {
+        this.clearOverflowHighlight();
         this.hideContextMenu();
         document.removeEventListener('mousedown', closeHandler);
       }
     };
     requestAnimationFrame(() => {
       document.addEventListener('mousedown', closeHandler);
+    });
+  }
+
+  private clearOverflowHighlight(): void {
+    document.querySelectorAll('.bsp-cell--overflow-target').forEach(el => {
+      el.classList.remove('bsp-cell--overflow-target');
+      delete (el as HTMLElement).dataset.overflowPosition;
     });
   }
 
@@ -696,6 +813,86 @@ export class LayoutDirector {
 
     const remainingLeaves = getAllLeaves(this.pages.find(p => p.id === page.id)!.layout);
     this.activeCellId = remainingLeaves[0]?.id ?? null;
+    this.navigationController?.rebuildSequence(this.pages);
+    this.syncToReact();
+  }
+
+  // =====================
+  //  USER-INITIATED OVERFLOW
+  // =====================
+
+  /**
+   * Move overflow content from source cell to a neighbor cell.
+   * Direction determines insert position:
+   *   right/down → prepend (overflow goes BEFORE target's content)
+   *   left/up    → append  (overflow goes AFTER target's content)
+   */
+  overflowTo(sourceCellId: string, targetCellId: string, direction: 'up' | 'down' | 'left' | 'right'): void {
+    if (!this.cellPool) return;
+
+    const sourceCell = this.cellPool.get(sourceCellId);
+    const targetCell = this.cellPool.get(targetCellId);
+    if (!sourceCell || !targetCell) return;
+
+    // Split the source PM doc at the visible height — returns overflow blocks
+    const maxHeight = sourceCell.contentElement.clientHeight;
+    const overflowBlocks = sourceCell.splitOverflow(maxHeight);
+    if (overflowBlocks.length === 0) return;
+
+    // Insert into target based on direction
+    if (direction === 'right' || direction === 'down') {
+      targetCell.prependBlocks(overflowBlocks);
+    } else {
+      targetCell.appendBlocks(overflowBlocks);
+    }
+
+    this.syncToReact();
+  }
+
+  /**
+   * Move overflow content from source cell to new pages inserted
+   * after the current page. Chain-splits until everything fits.
+   */
+  overflowToNewPages(sourceCellId: string): void {
+    if (!this.cellPool || !this.reconciler || !this.container) return;
+
+    const sourceCell = this.cellPool.get(sourceCellId);
+    if (!sourceCell) return;
+
+    const page = getPageForCell(this.pages, sourceCellId);
+    if (!page) return;
+
+    // Reset scroll for accurate measurement
+    sourceCell.contentElement.scrollTop = 0;
+
+    const maxHeight = sourceCell.contentElement.clientHeight;
+    let remaining = sourceCell.splitOverflow(maxHeight);
+    if (remaining.length === 0) return;
+
+    // Find the index of the current page to insert after it
+    let insertAfterPageId = page.id;
+
+    while (remaining.length > 0) {
+      const newPage = createPage(remaining);
+      this.pages = addPageAfter(this.pages, insertAfterPageId, newPage);
+      insertAfterPageId = newPage.id; // next overflow page goes after this one
+
+      this.reconciler.reconcilePages(this.container, this.pages);
+
+      // Check if new page overflows
+      const newPageLeaves = getAllLeaves(newPage.layout);
+      const newCell = this.cellPool.get(newPageLeaves[0]?.id ?? '');
+      if (!newCell) break;
+
+      newCell.contentElement.scrollTop = 0;
+
+      if (!newCell.hasOverflow()) break;
+
+      const newMaxHeight = newCell.contentElement.clientHeight;
+      remaining = newCell.splitOverflow(newMaxHeight);
+      if (remaining.length === 0) break;
+    }
+
     this.navigationController?.rebuildSequence(this.pages);
     this.syncToReact();
   }

@@ -138,6 +138,12 @@ export class CellInstance {
     return this.kernel.splitAt(maxHeight);
   }
 
+  /** Split content at the cursor position. Returns content after cursor. */
+  splitAtCursor(): Block[] {
+    if (!this.kernel) return [];
+    return this.kernel.splitAtCursor();
+  }
+
   /** Check if the cell's content overflows its visible area */
   hasOverflow(): boolean {
     return this.contentElement.scrollHeight > this.contentElement.clientHeight + 1;

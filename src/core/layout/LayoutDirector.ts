@@ -147,14 +147,16 @@ export class LayoutDirector {
     // Build navigation sequence
     this.navigationController.rebuildSequence(this.pages);
 
-    // After initial render, check if content exceeds the first page
-    requestAnimationFrame(() => {
+    // After initial render, check if content exceeds the first page.
+    // Use a delayed check to ensure DOM layout is fully computed.
+    // For large documents, ProseMirror needs time to render all nodes.
+    setTimeout(() => {
       const leaves = getAllLeaves(this.pages[0].layout);
       const lastLeafId = leaves[leaves.length - 1]?.id;
       if (lastLeafId) {
         this.distributeOverflowToPages(lastLeafId);
       }
-    });
+    }, 200);
 
     // Set up resize manager
     this.resizeManager = new SplitResizeManager(container, {
@@ -228,13 +230,13 @@ export class LayoutDirector {
     this.navigationController.rebuildSequence(this.pages);
 
     // Distribute across pages if content exceeds first page
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       const leaves = getAllLeaves(this.pages[0].layout);
       const lastLeafId = leaves[leaves.length - 1]?.id;
       if (lastLeafId) {
         this.distributeOverflowToPages(lastLeafId);
       }
-    });
+    }, 200);
   }
 
   destroy(): void {
@@ -277,30 +279,27 @@ export class LayoutDirector {
     const page = getPageForCell(this.pages, targetId);
     if (!page) return;
 
-    // Check if source cell has content (for content-aware horizontal split)
+    // Check if source cell has content (for content-aware horizontal split at cursor)
     const sourceCell = this.cellPool.get(targetId);
-    const hasContent = splitContent && sourceCell && !sourceCell.isEmpty();
+    const shouldSplitContent = splitContent && direction === 'horizontal'
+      && sourceCell && !sourceCell.isEmpty();
 
-    // Measure source cell height BEFORE the split (needed for content-aware split)
-    const sourceCellHeight = sourceCell?.contentElement.clientHeight ?? 0;
+    // Split content at cursor BEFORE the tree split (while PM editor is still full-size)
+    let cursorOverflow: Block[] = [];
+    if (shouldSplitContent) {
+      cursorOverflow = sourceCell.splitAtCursor();
+    }
 
     const { tree: newLayout, newCellId } = splitCell(page.layout, targetId, direction, ratio, reversed);
     this.updatePageLayout(page.id, newLayout);
 
     this.reconciler.reconcilePages(this.container!, this.pages);
 
-    // Content-aware horizontal split: move overflow text to the new cell
-    // Only triggered by explicit "Split Horizontal" from context menu, never by edge-drags
-    if (hasContent && direction === 'horizontal' && sourceCell) {
-      // The content cell's new height after split
-      const splitHeight = sourceCellHeight * ratio;
-
-      const overflowBlocks = sourceCell.splitOverflow(splitHeight);
-      if (overflowBlocks.length > 0) {
-        const newCell = this.cellPool.get(newCellId);
-        if (newCell) {
-          newCell.setContent(overflowBlocks);
-        }
+    // Move the content after cursor into the new cell
+    if (cursorOverflow.length > 0) {
+      const newCell = this.cellPool.get(newCellId);
+      if (newCell) {
+        newCell.setContent(cursorOverflow);
       }
     }
 

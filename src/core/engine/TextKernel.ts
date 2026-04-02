@@ -378,6 +378,58 @@ export class TextKernel implements ITextKernel {
     return overflowBlocks;
   }
 
+  /**
+   * Split the PM document at the current cursor position.
+   * Content before cursor stays in this editor.
+   * Content after cursor (from the start of the next top-level node) is returned.
+   * If cursor is at the very start or end, returns empty (no split).
+   */
+  splitAtCursor(): Block[] {
+    const { doc, selection } = this.view.state;
+    const cursorPos = selection.from;
+
+    // Don't split at very start or very end
+    if (cursorPos <= 1 || cursorPos >= doc.content.size - 1) return [];
+
+    // Find the top-level node boundary nearest to (and after) the cursor.
+    // We split BETWEEN top-level nodes, not mid-node.
+    let splitPos = 0;
+    let found = false;
+
+    doc.forEach((node: PmNode, offset: number) => {
+      if (found) return;
+      const nodeEnd = offset + node.nodeSize;
+      // If cursor is inside this node, split AFTER this node
+      if (cursorPos >= offset && cursorPos < nodeEnd) {
+        splitPos = nodeEnd;
+        found = true;
+      }
+    });
+
+    if (!found || splitPos === 0 || splitPos >= doc.content.size) return [];
+
+    // Split the doc
+    const beforeDoc = doc.cut(0, splitPos);
+    const afterDoc = doc.cut(splitPos);
+
+    // Update this editor with "before"
+    const newState = EditorState.create({
+      doc: beforeDoc,
+      schema: this.schema,
+      plugins: this.view.state.plugins,
+    });
+    this.view.updateState(newState);
+
+    // Convert "after" to Block[]
+    const overflowBlocks: Block[] = [];
+    afterDoc.forEach((node: PmNode) => {
+      const block = this.pmNodeToBlock(node);
+      if (block) overflowBlocks.push(block);
+    });
+
+    return overflowBlocks;
+  }
+
   // =====================
   //  MARKS & FORMATTING
   // =====================
@@ -698,6 +750,40 @@ export class TextKernel implements ITextKernel {
         return '<hr>';
       case 'image':
         return `<p><img src="${this.escapeHtml(block.src)}" alt="${this.escapeHtml(block.alt ?? '')}"></p>`;
+      case 'list': {
+        const tag = block.ordered ? 'ol' : 'ul';
+        const listItems = block.items.map(item => {
+          const content = this.inlinesToHtml(item.content);
+          const children = item.children ? this.blockToHtml(item.children) : '';
+          return `<li>${content}${children}</li>`;
+        }).join('');
+        return `<${tag}>${listItems}</${tag}>`;
+      }
+      case 'blockquote': {
+        const inner = block.blocks.map(b => this.blockToHtml(b)).join('');
+        return `<blockquote>${inner}</blockquote>`;
+      }
+      case 'table': {
+        // PM basic schema has no table nodes — render as paragraphs with tab-separated cells.
+        // Each row becomes a paragraph. Headers are bold.
+        const lines: string[] = [];
+        if (block.headers.length > 0) {
+          const headerText = block.headers.map(h =>
+            `<strong>${this.inlinesToHtml(h.content) || ' '}</strong>`
+          ).join(' │ ');
+          lines.push(`<p>${headerText}</p>`);
+          // Separator line
+          lines.push(`<p>${block.headers.map(() => '────').join('─┼─')}</p>`);
+        }
+        for (const row of block.rows) {
+          const rowText = row.map(c => this.inlinesToHtml(c.content) || ' ').join(' │ ');
+          lines.push(`<p>${rowText}</p>`);
+        }
+        return lines.join('');
+      }
+      case 'container': {
+        return block.children.map(b => this.blockToHtml(b)).join('');
+      }
       default:
         return '<p></p>';
     }

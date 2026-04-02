@@ -88,7 +88,7 @@
 
 .bsp-cell-content {
   flex: 1;
-  padding: 12px 16px 24px;
+  padding: 8px 12px 12px;
   outline: none;
   overflow-y: auto;
   overflow-x: hidden;
@@ -250,26 +250,22 @@
   margin-bottom: 2px;
 }
 
-/* ProseMirror within cells */
-.bsp-cell-content .block-content {
-  min-height: 1.5em;
+/* ProseMirror within cells — PM mounts directly into .bsp-cell-content */
+.bsp-cell-content .ProseMirror {
+  outline: none;
+  min-height: 100%;
+  caret-color: var(--text, #e2e8f0);
+}
+
+.bsp-cell-content .ProseMirror:focus {
   outline: none;
 }
 
-.bsp-cell-content .block-content .ProseMirror {
-  outline: none;
-  min-height: 1.5em;
-}
-
-.bsp-cell-content .block-content .ProseMirror:focus {
-  outline: none;
-}
-
-.bsp-cell-content .block-content .ProseMirror p {
+.bsp-cell-content .ProseMirror p {
   margin: 0 0 8px;
 }
 
-.bsp-cell-content .block-content .ProseMirror p:last-child {
+.bsp-cell-content .ProseMirror p:last-child {
   margin-bottom: 0;
 }
 
@@ -329,7 +325,7 @@
 }
 
 /* Placeholder for empty paragraphs in cells */
-.bsp-cell-content .block-content .ProseMirror p.is-editor-empty:first-child::before {
+.bsp-cell-content .ProseMirror p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   color: var(--text-muted, #94a3b8);
   pointer-events: none;

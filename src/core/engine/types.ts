@@ -124,6 +124,8 @@ export interface ITextKernel {
   getDocHeight(): number;
   /** Split the PM doc at maxHeight. Keeps "before" in editor, returns "after" as Block[]. */
   splitAt(maxHeight: number): Block[];
+  /** Split the PM doc at the current cursor position. Returns content after cursor. */
+  splitAtCursor(): Block[];
 
   // --- Formatting ---
 

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { DocumentTree } from './core/model/DocumentTree';
 import { createEmptyDocument } from './core/model/DocumentTree';
 import type { LayoutDirector } from './core/layout/LayoutDirector';
@@ -21,7 +21,7 @@ function App() {
   const [toolbarVersion, setToolbarVersion] = useState(0);
 
   const { openFile, openFilePath } = useFileOpen();
-  const { exportHtml, exportMarkdown, exportText, exportRtf } = useExport();
+  const { exportHtml, exportMarkdown, exportText, exportRtf, saveHtmlWithLayout } = useExport();
   const { recentFiles, addRecentFile, clearRecentFiles } = useRecentFiles();
 
   const loadDocument = useCallback((tree: DocumentTree) => {
@@ -58,8 +58,8 @@ function App() {
   }, [openFilePath, loadDocument]);
 
   const handleSave = useCallback(async () => {
-    await exportHtml(document);
-  }, [exportHtml, document]);
+    await saveHtmlWithLayout(document, engine);
+  }, [saveHtmlWithLayout, document, engine]);
 
   const handleExportHtml = useCallback(async () => {
     await exportHtml(document);
@@ -87,6 +87,18 @@ function App() {
       setToolbarVersion(v => v + 1);
     });
   }, []);
+
+  // Ctrl+S keyboard shortcut for save
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        handleSave();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleSave]);
 
   return (
     <div className="app">

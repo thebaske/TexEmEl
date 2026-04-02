@@ -10,7 +10,7 @@
 // the cross-cell boundary case.
 // ============================================================================
 
-import type { NavigationHandler } from '../engine/types';
+import type { NavigationHandler } from './types';
 import type { CellPool } from './CellPool';
 import type { Page } from './PageModel';
 import { getAllLeaves } from './LayoutTree';

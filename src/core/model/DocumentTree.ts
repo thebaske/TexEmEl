@@ -20,7 +20,20 @@ export interface DocumentMetadata {
   modifiedAt?: string;
   sourceFormat?: string;
   sourceFileName?: string;
+  /** BSP layout data from TexElEm HTML import — used to restore page/cell structure */
+  layoutPages?: LayoutPageData[];
 }
+
+/** Serialized page layout from TexElEm HTML round-trip */
+export interface LayoutPageData {
+  id: string;
+  layout: LayoutNodeData;
+}
+
+/** Serialized BSP node */
+export type LayoutNodeData =
+  | { type: 'leaf'; id: string; blocks: Block[] }
+  | { type: 'split'; id: string; direction: 'horizontal' | 'vertical'; ratio: number; first: LayoutNodeData; second: LayoutNodeData };
 
 // --- Layout / Container ---
 

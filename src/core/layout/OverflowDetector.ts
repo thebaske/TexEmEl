@@ -9,22 +9,19 @@
 // Requires DOM access — runs after render.
 // ============================================================================
 
-import type { BlockNode } from '../engine/BlockNode';
-
 /**
  * Lightweight interface for cell measurement.
- * Works with both CellRenderer.CellHandle (legacy) and CellInstance (V3).
+ * Works with CellInstance — uses ProseMirror DOM children for block measurement.
  */
 export interface MeasurableCell {
   cellId: string;
   contentElement: HTMLElement;
-  blockNodes: BlockNode[];
 }
 
 // --- Types ---
 
 export interface BlockPosition {
-  blockId: string;
+  index: number;
   element: HTMLElement;
   top: number;      // relative to cell content area
   bottom: number;
@@ -36,6 +33,8 @@ export interface OverflowInfo {
   hasOverflow: boolean;
   /** Index of the last block that fully fits (or -1 if none fit) */
   lastFittingBlockIndex: number;
+  /** Total number of top-level block elements measured */
+  totalBlocks: number;
   /** If the break falls mid-paragraph, line-level break info */
   lineBreak?: LineBreakInfo;
 }
@@ -43,7 +42,6 @@ export interface OverflowInfo {
 export interface LineBreakInfo {
   /** Index of the block that spans the boundary */
   blockIndex: number;
-  blockId: string;
   /** Character offset in the text content where the break should occur */
   charOffset: number;
   /** The Y position of the break line within the block element */
@@ -51,6 +49,9 @@ export interface LineBreakInfo {
 }
 
 // --- Detector ---
+
+/** Tags that represent text blocks eligible for line-level splitting */
+const TEXT_BLOCK_TAGS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
 
 export class OverflowDetector {
   /**
@@ -62,17 +63,31 @@ export class OverflowDetector {
   }
 
   /**
+   * Get the top-level block elements from the ProseMirror editor inside a cell.
+   * In V3 architecture, the contentElement contains a .ProseMirror div,
+   * whose direct children are the top-level block nodes.
+   */
+  private getBlockElements(handle: MeasurableCell): HTMLElement[] {
+    const pmEl = handle.contentElement.querySelector('.ProseMirror');
+    if (!pmEl) return [];
+    return Array.from(pmEl.children).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement
+    );
+  }
+
+  /**
    * Measure all block positions within a cell, relative to the cell content area.
    */
   measureBlockPositions(handle: MeasurableCell): BlockPosition[] {
     const contentRect = handle.contentElement.getBoundingClientRect();
+    const blockElements = this.getBlockElements(handle);
     const positions: BlockPosition[] = [];
 
-    for (const bn of handle.blockNodes) {
-      const rect = bn.element.getBoundingClientRect();
+    for (let i = 0; i < blockElements.length; i++) {
+      const rect = blockElements[i].getBoundingClientRect();
       positions.push({
-        blockId: bn.id,
-        element: bn.element,
+        index: i,
+        element: blockElements[i],
         top: rect.top - contentRect.top,
         bottom: rect.bottom - contentRect.top,
         height: rect.height,
@@ -91,12 +106,14 @@ export class OverflowDetector {
   findBreakPoint(handle: MeasurableCell): OverflowInfo {
     const cellId = handle.cellId;
     const cellHeight = handle.contentElement.clientHeight;
+    const blockElements = this.getBlockElements(handle);
 
     if (!this.hasOverflow(handle)) {
       return {
         cellId,
         hasOverflow: false,
-        lastFittingBlockIndex: handle.blockNodes.length - 1,
+        lastFittingBlockIndex: blockElements.length - 1,
+        totalBlocks: blockElements.length,
       };
     }
 
@@ -116,16 +133,15 @@ export class OverflowDetector {
     // that we can split at a line boundary
     const overflowIndex = lastFitting + 1;
     if (overflowIndex < positions.length) {
-      const overflowBlock = handle.blockNodes[overflowIndex];
+      const overflowEl = blockElements[overflowIndex];
       const overflowPos = positions[overflowIndex];
 
       // Only attempt line-level splitting for text blocks (paragraph, heading)
-      if (overflowBlock.isEditable() && overflowPos.top < cellHeight) {
+      if (TEXT_BLOCK_TAGS.has(overflowEl.tagName) && overflowPos.top < cellHeight) {
         // This block starts within the cell but extends beyond — try line break
         const lineBreak = this.findLineBreak(
-          overflowBlock.element,
+          overflowEl,
           cellHeight - overflowPos.top, // available height within the block
-          overflowBlock.id,
           overflowIndex,
         );
 
@@ -134,6 +150,7 @@ export class OverflowDetector {
             cellId,
             hasOverflow: true,
             lastFittingBlockIndex: lastFitting,
+            totalBlocks: blockElements.length,
             lineBreak,
           };
         }
@@ -145,6 +162,7 @@ export class OverflowDetector {
       cellId,
       hasOverflow: true,
       lastFittingBlockIndex: lastFitting,
+      totalBlocks: blockElements.length,
     };
   }
 
@@ -159,17 +177,12 @@ export class OverflowDetector {
   private findLineBreak(
     blockElement: HTMLElement,
     availableHeight: number,
-    blockId: string,
     blockIndex: number,
   ): LineBreakInfo | null {
-    // Find the ProseMirror content element
-    const pmEl = blockElement.querySelector('.ProseMirror') as HTMLElement;
-    if (!pmEl) return null;
-
     const blockRect = blockElement.getBoundingClientRect();
 
     // Walk through text nodes to find line boundaries
-    const walker = document.createTreeWalker(pmEl, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(blockElement, NodeFilter.SHOW_TEXT);
     let charOffset = 0;
     let lastFittingOffset = 0;
     let lastFittingY = 0;
@@ -195,7 +208,6 @@ export class OverflowDetector {
             if (lastFittingOffset > 0) {
               return {
                 blockIndex,
-                blockId,
                 charOffset: lastFittingOffset,
                 breakY: lastFittingY,
               };

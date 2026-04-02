@@ -8,7 +8,7 @@
 import { useEffect, useRef } from 'react';
 import type { DocumentTree } from '../../core/model/DocumentTree';
 import { LayoutDirector } from '../../core/layout/LayoutDirector';
-import { TextKernel } from '../../core/engine/TextKernel';
+import { TextKernel } from '../../core/layout/TextKernel';
 import type { Block } from '../../core/model/DocumentTree';
 
 // Import BSP styles

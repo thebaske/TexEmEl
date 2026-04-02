@@ -25,7 +25,7 @@ import type {
 } from '../model/DocumentTree';
 import type { ITextKernel, NavigationHandler } from './types';
 import { TextSelection } from 'prosemirror-state';
-import { generateBlockId } from './BlockId';
+import { generateBlockId } from '../model/BlockId';
 
 // --- Schema ---
 
@@ -187,6 +187,7 @@ export class TextKernel implements ITextKernel {
   private schema: Schema;
   private updateCallbacks: (() => void)[] = [];
   private selectionUpdateCallbacks: (() => void)[] = [];
+  private navigationHandler: NavigationHandler | null = null;
   /** Stored cursor X for goal-column preservation across cell boundaries */
   lastCursorX: number | null = null;
 
@@ -202,12 +203,20 @@ export class TextKernel implements ITextKernel {
         history(),
         buildKeymaps(this.schema),
         buildInputRules(this.schema),
+        // Cross-cell navigation: detect boundary hits and delegate to handler
+        keymap({
+          ArrowUp: () => this.tryBoundaryNavigation('up'),
+          ArrowDown: () => this.tryBoundaryNavigation('down'),
+          ArrowLeft: () => this.tryBoundaryNavigation('left'),
+          ArrowRight: () => this.tryBoundaryNavigation('right'),
+        }),
         keymap(baseKeymap),
       ],
     });
 
     this.view = new EditorView(container, {
       state,
+      attributes: { spellcheck: 'true' },
       dispatchTransaction: (tr: Transaction) => {
         const shouldScroll = tr.scrolledIntoView;
         const newState = this.view.state.apply(tr);
@@ -249,8 +258,8 @@ export class TextKernel implements ITextKernel {
     });
   }
 
-  // Cross-cell navigation removed — cell switching is mouse-only.
-  // PM handles all arrow key navigation natively within the cell.
+  // Cross-cell navigation: when cursor hits a boundary (start/end of document),
+  // the navigation handler transfers focus to the adjacent cell.
 
   // =====================
   //  CONTENT: READ
@@ -647,8 +656,35 @@ export class TextKernel implements ITextKernel {
     this.selectionUpdateCallbacks.push(callback);
   }
 
-  setNavigationHandler(_handler: NavigationHandler | null): void {
-    // Navigation is mouse-only — handler stored but not used for arrow keys
+  setNavigationHandler(handler: NavigationHandler | null): void {
+    this.navigationHandler = handler;
+  }
+
+  /**
+   * Try to navigate across cell boundaries.
+   * Returns true (consumed) if cursor is at boundary and handler is called.
+   * Returns false (not consumed) to let PM handle the key normally.
+   */
+  private tryBoundaryNavigation(direction: 'up' | 'down' | 'left' | 'right'): boolean {
+    if (!this.navigationHandler) return false;
+
+    const isAtBoundary =
+      (direction === 'up' || direction === 'left') ? this.isCursorAtStart() :
+      (direction === 'down' || direction === 'right') ? this.isCursorAtEnd() :
+      false;
+
+    if (!isAtBoundary) return false;
+
+    // Store cursor X for goal-column preservation
+    try {
+      const coords = this.view.coordsAtPos(this.view.state.selection.from);
+      this.lastCursorX = coords.left;
+    } catch {
+      this.lastCursorX = null;
+    }
+
+    this.navigationHandler.onBoundary(direction);
+    return true;
   }
 
   getView(): EditorView {

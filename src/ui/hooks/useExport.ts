@@ -1,9 +1,11 @@
 import { useCallback } from 'react';
 import type { DocumentTree } from '../../core/model/DocumentTree';
-import { exportToHtml } from '../../core/export/HtmlExporter';
+import type { LayoutDirector } from '../../core/layout/LayoutDirector';
+import { exportToHtml, exportToHtmlWithLayout } from '../../core/export/HtmlExporter';
 import { exportToMarkdown } from '../../core/export/MarkdownExporter';
 import { exportToText } from '../../core/export/TxtExporter';
 import { exportToRtf } from '../../core/export/RtfExporter';
+import { getAllLeaves } from '../../core/layout/LayoutTree';
 
 async function saveTextWithTauri(
   content: string,
@@ -76,5 +78,37 @@ export function useExport() {
     return true;
   }, []);
 
-  return { exportHtml, exportMarkdown, exportText, exportRtf };
+  /**
+   * Save HTML with BSP layout preserved (for TexElEm round-trip).
+   * Falls back to flat export if no engine is provided.
+   */
+  const saveHtmlWithLayout = useCallback(async (doc: DocumentTree, engine: LayoutDirector | null): Promise<boolean> => {
+    let html: string;
+
+    if (engine) {
+      const pages = engine.getPages();
+      const getCellContent = (cellId: string) => {
+        // Read live content from the cell pool
+        const cell = (engine as any).cellPool?.get(cellId);
+        if (cell) return cell.getContent();
+        // Fallback to leaf blocks from the tree
+        for (const page of pages) {
+          for (const leaf of getAllLeaves(page.layout)) {
+            if (leaf.id === cellId) return leaf.blocks;
+          }
+        }
+        return [];
+      };
+      html = exportToHtmlWithLayout(doc, pages, getCellContent);
+    } else {
+      html = exportToHtml(doc);
+    }
+
+    const name = baseName(doc) + '.html';
+    const saved = await saveTextWithTauri(html, name, 'HTML', ['html']);
+    if (!saved) return saveWithBrowser(html, name, 'text/html');
+    return true;
+  }, []);
+
+  return { exportHtml, exportMarkdown, exportText, exportRtf, saveHtmlWithLayout };
 }

@@ -6,7 +6,7 @@
 // and DOM→model resolution.
 // ============================================================================
 
-import type { Block, ListItem } from '../model/DocumentTree';
+import type { Block, ListItem } from './DocumentTree';
 
 export function generateBlockId(): string {
   return crypto.randomUUID();

@@ -6,6 +6,8 @@ import type {
   TextMark,
   ListItem,
   TableCell,
+  LayoutPageData,
+  LayoutNodeData,
 } from '../model/DocumentTree';
 
 // HTML Codec — parses HTML into DocumentTree using DOMParser
@@ -28,6 +30,14 @@ export const htmlCodec: FormatCodec = {
       'Untitled';
 
     const body = doc.body;
+
+    // Detect TexElEm layout structure
+    const pageEls = body.querySelectorAll('.texemel-page');
+    if (pageEls.length > 0) {
+      return parseTexemelLayout(pageEls, title, fileName);
+    }
+
+    // Standard flat HTML parsing
     const blocks = parseElements(body.children);
 
     return {
@@ -41,6 +51,111 @@ export const htmlCodec: FormatCodec = {
     };
   },
 };
+
+// ============================================================================
+// TexElEm Layout Parsing — Reconstruct BSP tree from texemel-* classes
+// ============================================================================
+
+function parseTexemelLayout(
+  pageEls: NodeListOf<Element>,
+  title: string,
+  fileName?: string,
+): DocumentTree {
+  const layoutPages: LayoutPageData[] = [];
+  const allBlocks: Block[] = [];
+
+  for (let i = 0; i < pageEls.length; i++) {
+    const pageEl = pageEls[i] as HTMLElement;
+    const pageId = pageEl.dataset.pageId ?? `page-${i}`;
+
+    // Parse the BSP structure from nested children
+    const layout = parseLayoutNode(pageEl);
+    if (layout) {
+      layoutPages.push({ id: pageId, layout });
+      // Collect all blocks from leaves for the flat block list
+      collectBlocksFromLayout(layout, allBlocks);
+    }
+  }
+
+  return {
+    blocks: allBlocks.length > 0 ? allBlocks : [{ type: 'paragraph', content: [] }],
+    metadata: {
+      title,
+      sourceFormat: 'html',
+      sourceFileName: fileName,
+      modifiedAt: new Date().toISOString(),
+      layoutPages,
+    },
+  };
+}
+
+function parseLayoutNode(el: HTMLElement): LayoutNodeData | null {
+  // Check if this element IS a cell
+  if (el.classList.contains('texemel-cell')) {
+    const cellId = el.dataset.cellId ?? crypto.randomUUID();
+    const blocks = parseElements(el.children);
+    return { type: 'leaf', id: cellId, blocks };
+  }
+
+  // Check if this element IS a split
+  if (el.classList.contains('texemel-split-h') || el.classList.contains('texemel-split-v')) {
+    const direction = el.classList.contains('texemel-split-h') ? 'horizontal' as const : 'vertical' as const;
+    const splitId = el.dataset.splitId ?? crypto.randomUUID();
+    const ratio = parseFloat(el.dataset.ratio ?? '0.5');
+
+    // Children should be two divs with flex styles wrapping the actual split/cell nodes
+    const children = Array.from(el.children).filter(c => c instanceof HTMLElement) as HTMLElement[];
+    if (children.length < 2) return null;
+
+    // Each child wrapper contains the actual layout node
+    const firstChild = findLayoutChild(children[0]);
+    const secondChild = findLayoutChild(children[1]);
+
+    if (!firstChild || !secondChild) return null;
+
+    return { type: 'split', id: splitId, direction, ratio, first: firstChild, second: secondChild };
+  }
+
+  // Check if this element is a page wrapper — look for first layout child
+  const firstLayoutChild = findLayoutChild(el);
+  return firstLayoutChild;
+}
+
+function findLayoutChild(el: HTMLElement): LayoutNodeData | null {
+  // The element itself might be the layout node
+  if (el.classList.contains('texemel-cell') ||
+      el.classList.contains('texemel-split-h') ||
+      el.classList.contains('texemel-split-v')) {
+    return parseLayoutNode(el);
+  }
+
+  // Search direct children
+  for (let i = 0; i < el.children.length; i++) {
+    const child = el.children[i] as HTMLElement;
+    if (child.classList.contains('texemel-cell') ||
+        child.classList.contains('texemel-split-h') ||
+        child.classList.contains('texemel-split-v')) {
+      return parseLayoutNode(child);
+    }
+  }
+
+  // If no layout node found, treat entire content as a single cell
+  const blocks = parseElements(el.children);
+  if (blocks.length > 0) {
+    return { type: 'leaf', id: crypto.randomUUID(), blocks };
+  }
+
+  return null;
+}
+
+function collectBlocksFromLayout(node: LayoutNodeData, blocks: Block[]): void {
+  if (node.type === 'leaf') {
+    blocks.push(...node.blocks);
+  } else {
+    collectBlocksFromLayout(node.first, blocks);
+    collectBlocksFromLayout(node.second, blocks);
+  }
+}
 
 function parseElements(elements: HTMLCollection): Block[] {
   const blocks: Block[] = [];

@@ -11,7 +11,7 @@
 // ============================================================================
 
 import type { Block } from '../model/DocumentTree';
-import type { ITextKernel } from '../engine/types';
+import type { ITextKernel } from './types';
 
 // --- Types ---
 

@@ -14,7 +14,7 @@
 // ============================================================================
 
 import type { Block } from '../model/DocumentTree';
-import type { CellHandle } from './CellRenderer';
+import type { CellInstance } from './CellInstance';
 import type { Page } from './PageModel';
 import type { LeafNode } from './LayoutTree';
 import { OverflowDetector } from './OverflowDetector';
@@ -57,12 +57,12 @@ export class OverflowResolver {
    * Call this after any layout or content change.
    *
    * @param pages Current pages array
-   * @param getCellHandle Function to retrieve CellHandle by cellId (from CellRenderer)
+   * @param getCell Function to retrieve CellInstance by cellId
    * @returns Updated pages and affected page IDs
    */
   resolve(
     pages: Page[],
-    getCellHandle: (cellId: string) => CellHandle | undefined,
+    getCell: (cellId: string) => CellInstance | undefined,
   ): ResolveResult {
     let currentPages = pages;
     const affectedPageIds = new Set<string>();
@@ -78,9 +78,10 @@ export class OverflowResolver {
         const leaves = getAllLeaves(page.layout);
 
         for (const leaf of leaves) {
-          const handle = getCellHandle(leaf.id);
-          if (!handle) continue;
+          const cell = getCell(leaf.id);
+          if (!cell) continue;
 
+          const handle = { cellId: leaf.id, contentElement: cell.contentElement };
           if (!this.detector.hasOverflow(handle)) continue;
 
           // Found overflow — resolve it
@@ -89,12 +90,13 @@ export class OverflowResolver {
           affectedPageIds.add(page.id);
 
           const overflowInfo = this.detector.findBreakPoint(handle);
-          const blocks = handle.blockNodes.map(bn => bn.getData());
+          const blocks = cell.getContent();
           const { fitting, overflow } = this.splitter.splitOnOverflow(blocks, overflowInfo);
 
           if (overflow.length === 0) continue; // Guard: nothing to move
 
-          // Update current cell to keep only fitting blocks
+          // Update current cell with only fitting blocks
+          cell.setContent(fitting);
           currentPages = this.updateCellBlocks(currentPages, page.id, leaf.id, fitting);
 
           // Find overflow target: sibling cells first, then next page
@@ -106,6 +108,10 @@ export class OverflowResolver {
             if (!targetLeaf || targetLeaf.type !== 'leaf') continue;
 
             // Prepend overflow blocks to the target cell
+            const targetCell = getCell(targetCellId);
+            if (targetCell) {
+              targetCell.prependBlocks(overflow);
+            }
             const targetBlocks = [...overflow, ...targetLeaf.blocks];
             currentPages = this.updateCellBlocks(currentPages, page.id, targetCellId, targetBlocks);
             placed = true;
@@ -147,7 +153,7 @@ export class OverflowResolver {
    */
   resolveUnderflow(
     _pages: Page[],
-    _getCellHandle: (cellId: string) => CellHandle | undefined,
+    _getCell: (cellId: string) => CellInstance | undefined,
   ): ResolveResult {
     // Phase 2: implement rejoin of split paragraphs
     return { pages: _pages, affectedPageIds: new Set(), changed: false };

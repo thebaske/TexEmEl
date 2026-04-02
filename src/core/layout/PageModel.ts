@@ -10,7 +10,7 @@
 import type { Block, DocumentMetadata } from '../model/DocumentTree';
 import type { LayoutNode, LeafNode } from './LayoutTree';
 import { createDefaultLayout, getAllLeaves, collectBlocks, findNode, findParent } from './LayoutTree';
-import { generateBlockId } from '../engine/BlockId';
+import { generateBlockId } from '../model/BlockId';
 
 // --- Types ---
 

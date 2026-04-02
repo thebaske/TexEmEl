@@ -14,13 +14,14 @@
 // ============================================================================
 
 import type { Block, DocumentTree, TextMark } from '../model/DocumentTree';
-import type { ITextKernel } from '../engine/types';
-import { generateBlockId, assignBlockIds } from '../engine/BlockId';
+import type { ITextKernel } from './types';
+import { generateBlockId, assignBlockIds } from '../model/BlockId';
 import { CellPool } from './CellPool';
 import { LayoutReconciler } from './LayoutReconciler';
 import { SplitResizeManager } from './SplitResizeManager';
 import { EdgeSplitManager } from './EdgeSplitManager';
 import { NavigationController } from './NavigationController';
+import { OverflowWatcher } from './OverflowWatcher';
 import {
   type LayoutNode,
   type SplitDirection,
@@ -32,9 +33,11 @@ import {
   findParent,
   getAllLeaves,
 } from './LayoutTree';
+import type { LayoutNodeData } from '../model/DocumentTree';
 import {
   type Page,
   createPage,
+  createPageWithLayout,
   addPageAfter,
   getPageForCell,
 } from './PageModel';
@@ -69,6 +72,7 @@ export class LayoutDirector {
   private resizeManager: SplitResizeManager | null = null;
   private edgeSplitManager: EdgeSplitManager | null = null;
   private navigationController: NavigationController | null = null;
+  private overflowWatcher: OverflowWatcher | null = null;
 
   // Kernel factory — injected by consumer
   private kernelFactory: ((el: HTMLElement, blocks: Block[]) => ITextKernel) | null = null;
@@ -105,11 +109,18 @@ export class LayoutDirector {
     // Clear any stale DOM from prior mount (React StrictMode double-fires effects)
     container.innerHTML = '';
 
-    // Convert flat block list to single-page BSP layout
-    const blocks = assignBlockIds(doc.blocks);
-    this.pages = [createPage(blocks)];
-    this.activePageId = this.pages[0].id;
+    // Restore BSP layout from metadata (TexElEm HTML round-trip) or create default
     this.metadata = doc.metadata;
+    if (doc.metadata.layoutPages && doc.metadata.layoutPages.length > 0) {
+      this.pages = doc.metadata.layoutPages.map(pageData => {
+        const layout = this.layoutNodeDataToLayoutNode(pageData.layout);
+        return createPageWithLayout(layout, pageData.id);
+      });
+    } else {
+      const blocks = assignBlockIds(doc.blocks);
+      this.pages = [createPage(blocks)];
+    }
+    this.activePageId = this.pages[0].id;
 
     // Create navigation controller (cross-cell keyboard movement)
     this.navigationController = new NavigationController(
@@ -122,10 +133,9 @@ export class LayoutDirector {
     // Create subsystems
     this.cellPool = new CellPool({
       kernelFactory: this.kernelFactory!,
-      onContentChange: (cellId: string) => {
+      onContentChange: (_cellId: string) => {
         this.debouncedSync();
         this.emitToolbarUpdate();
-        this.checkLastCellOverflow(cellId);
       },
       onSelectionChange: (_cellId: string) => {
         this.emitToolbarUpdate();
@@ -141,22 +151,23 @@ export class LayoutDirector {
       onCellDblClick: (cellId, _e) => this.handleCellDblClick(cellId),
     });
 
+    // Create overflow watcher — ResizeObserver-based, replaces hardcoded setTimeout
+    this.overflowWatcher = new OverflowWatcher({
+      onOverflow: (cellId) => this.handleOverflow(cellId),
+      onUnderflow: (_cellId) => {
+        // TODO: implement rejoin (Step 6)
+      },
+      threshold: 2,
+    });
+
     // Initial render
     this.reconciler.reconcilePages(container, this.pages);
 
+    // Watch all cells for overflow
+    this.watchAllCells();
+
     // Build navigation sequence
     this.navigationController.rebuildSequence(this.pages);
-
-    // After initial render, check if content exceeds the first page.
-    // Use a delayed check to ensure DOM layout is fully computed.
-    // For large documents, ProseMirror needs time to render all nodes.
-    setTimeout(() => {
-      const leaves = getAllLeaves(this.pages[0].layout);
-      const lastLeafId = leaves[leaves.length - 1]?.id;
-      if (lastLeafId) {
-        this.distributeOverflowToPages(lastLeafId);
-      }
-    }, 200);
 
     // Set up resize manager
     this.resizeManager = new SplitResizeManager(container, {
@@ -201,10 +212,9 @@ export class LayoutDirector {
     // Recreate pool
     this.cellPool = new CellPool({
       kernelFactory: this.kernelFactory!,
-      onContentChange: (cellId: string) => {
+      onContentChange: (_cellId: string) => {
         this.debouncedSync();
         this.emitToolbarUpdate();
-        this.checkLastCellOverflow(cellId);
       },
       onSelectionChange: (_cellId: string) => {
         this.emitToolbarUpdate();
@@ -220,28 +230,38 @@ export class LayoutDirector {
       onCellDblClick: (cellId, _e) => this.handleCellDblClick(cellId),
     });
 
-    const blocks = assignBlockIds(doc.blocks);
-    this.pages = [createPage(blocks)];
-    this.activePageId = this.pages[0].id;
     this.metadata = doc.metadata;
+    if (doc.metadata.layoutPages && doc.metadata.layoutPages.length > 0) {
+      this.pages = doc.metadata.layoutPages.map(pageData => {
+        const layout = this.layoutNodeDataToLayoutNode(pageData.layout);
+        return createPageWithLayout(layout, pageData.id);
+      });
+    } else {
+      const blocks = assignBlockIds(doc.blocks);
+      this.pages = [createPage(blocks)];
+    }
+    this.activePageId = this.pages[0].id;
     this.activeCellId = null;
 
-    this.reconciler.reconcilePages(this.container, this.pages);
-    this.navigationController.rebuildSequence(this.pages);
+    // Recreate overflow watcher
+    this.overflowWatcher?.destroy();
+    this.overflowWatcher = new OverflowWatcher({
+      onOverflow: (cellId) => this.handleOverflow(cellId),
+      onUnderflow: (_cellId) => {
+        // TODO: implement rejoin (Step 6)
+      },
+      threshold: 2,
+    });
 
-    // Distribute across pages if content exceeds first page
-    setTimeout(() => {
-      const leaves = getAllLeaves(this.pages[0].layout);
-      const lastLeafId = leaves[leaves.length - 1]?.id;
-      if (lastLeafId) {
-        this.distributeOverflowToPages(lastLeafId);
-      }
-    }, 200);
+    this.reconciler.reconcilePages(this.container, this.pages);
+    this.watchAllCells();
+    this.navigationController.rebuildSequence(this.pages);
   }
 
   destroy(): void {
     if (this.syncTimer) clearTimeout(this.syncTimer);
     if (this.overflowCheckTimer) clearTimeout(this.overflowCheckTimer);
+    this.overflowWatcher?.destroy();
     this.resizeManager?.destroy();
     this.edgeSplitManager?.destroy();
     this.reconciler?.destroy();
@@ -295,12 +315,15 @@ export class LayoutDirector {
 
     this.reconciler.reconcilePages(this.container!, this.pages);
 
+    // Watch the new cell
+    const newCell = this.cellPool.get(newCellId);
+    if (newCell) {
+      this.overflowWatcher?.watch(newCell);
+    }
+
     // Move the content after cursor into the new cell
-    if (cursorOverflow.length > 0) {
-      const newCell = this.cellPool.get(newCellId);
-      if (newCell) {
-        newCell.setContent(cursorOverflow);
-      }
+    if (cursorOverflow.length > 0 && newCell) {
+      newCell.setContent(cursorOverflow);
     }
 
     this.navigationController?.rebuildSequence(this.pages);
@@ -940,17 +963,50 @@ export class LayoutDirector {
     for (const cb of this.onToolbarUpdateCallbacks) cb();
   }
 
+  /** Convert serialized LayoutNodeData (from HTML import) to runtime LayoutNode */
+  private layoutNodeDataToLayoutNode(data: LayoutNodeData): LayoutNode {
+    if (data.type === 'leaf') {
+      return {
+        type: 'leaf',
+        id: data.id,
+        blocks: assignBlockIds(data.blocks),
+      };
+    }
+    return {
+      type: 'split',
+      id: data.id,
+      direction: data.direction,
+      ratio: data.ratio,
+      first: this.layoutNodeDataToLayoutNode(data.first),
+      second: this.layoutNodeDataToLayoutNode(data.second),
+    };
+  }
+
   // =====================
   //  PASTE-TIME PAGE CREATION
   // =====================
 
   private overflowCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private checkLastCellOverflow(cellId: string): void {
+  /** Watch all currently pooled cells for overflow via ResizeObserver */
+  private watchAllCells(): void {
+    if (!this.overflowWatcher || !this.cellPool) return;
+    for (const page of this.pages) {
+      const leaves = getAllLeaves(page.layout);
+      for (const leaf of leaves) {
+        const cell = this.cellPool.get(leaf.id);
+        if (cell) this.overflowWatcher.watch(cell);
+      }
+    }
+  }
+
+  /** Called by OverflowWatcher when a cell's content exceeds its container */
+  private handleOverflow(cellId: string): void {
+    // Debounce overflow handling to batch rapid changes
     if (this.overflowCheckTimer) clearTimeout(this.overflowCheckTimer);
     this.overflowCheckTimer = setTimeout(() => {
       this.distributeOverflowToPages(cellId);
-    }, 100);
+    }, 50);
   }
 
   /**
@@ -977,38 +1033,46 @@ export class LayoutDirector {
 
     if (!cell.hasOverflow()) return;
 
-    // Split the PM document at the cell's visible height
-    const maxHeight = cell.contentElement.clientHeight;
-    const overflowBlocks = cell.splitOverflow(maxHeight);
-    if (overflowBlocks.length === 0) return;
+    // Guard: pause overflow watcher during resolution to prevent re-entrant checks
+    this.overflowWatcher?.beginResolving();
 
-    // Create new pages with overflow content
-    let remaining = overflowBlocks;
+    try {
+      // Split the PM document at the cell's visible height
+      const maxHeight = cell.contentElement.clientHeight;
+      const overflowBlocks = cell.splitOverflow(maxHeight);
+      if (overflowBlocks.length === 0) return;
 
-    while (remaining.length > 0) {
-      const newPage = createPage(remaining);
-      this.pages = addPageAfter(this.pages, this.pages[this.pages.length - 1].id, newPage);
+      // Create new pages with overflow content
+      let remaining = overflowBlocks;
 
-      // Reconcile to render the new page
-      this.reconciler.reconcilePages(this.container, this.pages);
+      while (remaining.length > 0) {
+        const newPage = createPage(remaining);
+        this.pages = addPageAfter(this.pages, this.pages[this.pages.length - 1].id, newPage);
 
-      // Check if the new page's cell overflows too
-      const newPageLeaves = getAllLeaves(newPage.layout);
-      const newCell = this.cellPool.get(newPageLeaves[0]?.id ?? '');
-      if (!newCell) break;
+        // Reconcile to render the new page
+        this.reconciler.reconcilePages(this.container, this.pages);
 
-      newCell.contentElement.scrollTop = 0;
+        // Watch the new cell
+        const newPageLeaves = getAllLeaves(newPage.layout);
+        const newCell = this.cellPool.get(newPageLeaves[0]?.id ?? '');
+        if (!newCell) break;
+        this.overflowWatcher?.watch(newCell);
 
-      if (!newCell.hasOverflow()) break;
+        newCell.contentElement.scrollTop = 0;
 
-      // Still overflows — split again
-      const newMaxHeight = newCell.contentElement.clientHeight;
-      remaining = newCell.splitOverflow(newMaxHeight);
-      if (remaining.length === 0) break;
+        if (!newCell.hasOverflow()) break;
+
+        // Still overflows — split again
+        const newMaxHeight = newCell.contentElement.clientHeight;
+        remaining = newCell.splitOverflow(newMaxHeight);
+        if (remaining.length === 0) break;
+      }
+
+      this.navigationController?.rebuildSequence(this.pages);
+      this.syncToReact();
+    } finally {
+      this.overflowWatcher?.endResolving();
     }
-
-    this.navigationController?.rebuildSequence(this.pages);
-    this.syncToReact();
   }
 
   private debouncedSync(): void {

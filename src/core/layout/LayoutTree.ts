@@ -9,7 +9,7 @@
 // ============================================================================
 
 import type { Block } from '../model/DocumentTree';
-import { generateBlockId } from '../engine/BlockId';
+import { generateBlockId } from '../model/BlockId';
 
 // --- Node Types ---
 

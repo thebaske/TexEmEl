@@ -6,6 +6,8 @@ import type {
   ListItem,
   TableCell,
 } from '../model/DocumentTree';
+import type { LayoutNode } from '../layout/LayoutTree';
+import type { Page } from '../layout/PageModel';
 
 // ============================================================================
 // HtmlExporter — Converts DocumentTree → self-contained HTML file
@@ -97,6 +99,143 @@ export function exportToHtml(tree: DocumentTree): string {
 ${bodyHtml}
 </body>
 </html>`;
+}
+
+// ============================================================================
+// BSP-Aware HTML Export — Preserves layout as nested flexbox
+//
+// Each page → .texemel-page
+// Each split → .texemel-split-h or .texemel-split-v with flex ratio
+// Each leaf cell → .texemel-cell
+// Content within cells is standard HTML blocks.
+//
+// This creates a round-trippable HTML file: TexElEm can re-import
+// the layout structure, and browsers render it correctly.
+// ============================================================================
+
+/**
+ * Export with full BSP layout preservation.
+ * Pages parameter comes from LayoutDirector.getPages().
+ * Each page's leaf cells must have their live content passed via getCellContent.
+ */
+export function exportToHtmlWithLayout(
+  tree: DocumentTree,
+  pages: Page[],
+  getCellContent: (cellId: string) => Block[],
+): string {
+  const title = escapeHtml(tree.metadata.title ?? 'Untitled');
+  const pagesHtml = pages.map(page => renderPage(page, getCellContent)).join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="TexElEm">
+  <title>${title}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #e5e5e5;
+      padding: 24px;
+      line-height: 1.7;
+      color: #1a1a1a;
+      font-size: 11pt;
+    }
+    .texemel-page {
+      width: 816px;
+      min-height: 1056px;
+      margin: 0 auto 24px auto;
+      background: white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+      display: flex;
+      flex-direction: column;
+    }
+    .texemel-split-h { display: flex; flex-direction: column; flex: 1; }
+    .texemel-split-v { display: flex; flex-direction: row; flex: 1; }
+    .texemel-cell {
+      padding: 24px;
+      overflow: hidden;
+      flex: 1;
+    }
+    h1 { font-size: 24pt; margin: 0.8em 0 0.4em; color: #111; font-weight: 700; }
+    h2 { font-size: 18pt; margin: 0.7em 0 0.35em; color: #222; font-weight: 600; }
+    h3 { font-size: 14pt; margin: 0.6em 0 0.3em; color: #333; font-weight: 600; }
+    h4 { font-size: 12pt; margin: 0.5em 0 0.25em; color: #333; font-weight: 600; }
+    h5 { font-size: 11pt; margin: 0.5em 0 0.2em; color: #444; font-weight: 600; }
+    h6 { font-size: 10pt; margin: 0.5em 0 0.2em; color: #555; font-weight: 600; }
+    p { margin: 0.5em 0; }
+    ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
+    li { margin: 0.15em 0; }
+    blockquote {
+      border-left: 3px solid #ccc;
+      padding-left: 1em;
+      margin: 0.5em 0;
+      color: #555;
+    }
+    pre {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 0.8em;
+      margin: 0.5em 0;
+      overflow-x: auto;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 9.5pt;
+      line-height: 1.5;
+    }
+    code {
+      background: #f0f0f0;
+      padding: 0.15em 0.3em;
+      border-radius: 3px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 0.9em;
+    }
+    pre code { background: none; padding: 0; border-radius: 0; }
+    table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 10pt; }
+    th, td { border: 1px solid #ccc; padding: 0.4em 0.6em; text-align: left; }
+    th { background: #f5f5f5; font-weight: 600; }
+    img { max-width: 100%; height: auto; margin: 0.5em 0; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 1.5em 0; }
+    a { color: #2563eb; text-decoration: underline; }
+    mark { background: #fef08a; padding: 0.1em 0.2em; }
+    @media print {
+      body { background: none; padding: 0; }
+      .texemel-page { box-shadow: none; margin: 0; page-break-after: always; }
+    }
+  </style>
+</head>
+<body>
+${pagesHtml}
+</body>
+</html>`;
+}
+
+function renderPage(page: Page, getCellContent: (cellId: string) => Block[]): string {
+  return `<div class="texemel-page" data-page-id="${page.id}">\n${renderLayoutNode(page.layout, getCellContent)}\n</div>`;
+}
+
+function renderLayoutNode(node: LayoutNode, getCellContent: (cellId: string) => Block[]): string {
+  if (node.type === 'leaf') {
+    const blocks = getCellContent(node.id);
+    const blocksHtml = blocks.map(renderBlock).join('\n');
+    return `<div class="texemel-cell" data-cell-id="${node.id}">\n${blocksHtml}\n</div>`;
+  }
+
+  // Split node
+  const dirClass = node.direction === 'horizontal' ? 'texemel-split-h' : 'texemel-split-v';
+  const firstFlex = node.ratio;
+  const secondFlex = 1 - node.ratio;
+
+  const firstHtml = renderLayoutNode(node.first, getCellContent);
+  const secondHtml = renderLayoutNode(node.second, getCellContent);
+
+  // Wrap children with flex style for the ratio
+  const firstWrapped = `<div style="flex: ${firstFlex}">\n${firstHtml}\n</div>`;
+  const secondWrapped = `<div style="flex: ${secondFlex}">\n${secondHtml}\n</div>`;
+
+  return `<div class="${dirClass}" data-split-id="${node.id}" data-ratio="${node.ratio}">\n${firstWrapped}\n${secondWrapped}\n</div>`;
 }
 
 function renderBlock(block: Block): string {
